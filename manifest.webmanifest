@@ -1,0 +1,13 @@
+{
+  "name": "The Great Tea Machine",
+  "short_name": "Tea Machine",
+  "description": "Build a tea-making machine with mechanical, electrical and chemical engineering!",
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#f7edd8",
+  "theme_color": "#3fa8a0",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -14,16 +14,18 @@ the way by your mentor, Professor Pekoe.
 
 **No install, no build, no internet needed.** The whole game is one file:
 
+- **Play online:** the repo auto-deploys to GitHub Pages at
+  `https://mrbilalshah.github.io/tea/` (see `.github/workflows/pages.yml`).
 - **Double-click `index.html`** — it opens and runs in any modern browser
   (Chrome, Edge, Firefox, Safari), on desktop or tablet.
 - Or serve it, e.g. `npx http-server` and open `http://localhost:8080`.
 
 Progress (and your machine's settings) are saved automatically in the browser.
+When served over the web it's also an installable PWA that works offline after
+the first visit.
 
-### Hosting on GitHub Pages
-
-Repo **Settings → Pages → Deploy from a branch**, pick your branch and `/ (root)`.
-The game appears at `https://<user>.github.io/<repo>/` — nothing else required.
+> If the Pages deploy workflow can't auto-enable Pages, do it once manually:
+> **Settings → Pages → Source: GitHub Actions**, then re-run the workflow.
 
 ## The five stages
 
@@ -37,8 +39,25 @@ The game appears at `https://<user>.github.io/<repo>/` — nothing else required
 
 Every puzzle has multiple valid solutions, honest failure modes (jams, shorts,
 blown fuses, scorched tea…), and a "Concept unlocked!" card naming the real
-idea. Finish with a 1–3 star rating based on how many retries the journey took —
-and retries are celebrated, because that's how engineering works.
+idea — followed by a friendly one-question concept check. Retries are
+celebrated, because that's how engineering works.
+
+## Beyond the first cup
+
+- **Per-stage star ratings** (precision + first-try bonus) shown on the map.
+- **Randomized targets** — "Brew another cup" re-rolls the RPM band, the power
+  band, and the lift target, so every playthrough is a new engineering job.
+- **Engineer Mode** (unlocked after your first certificate): narrower
+  tolerances and no recipe hints on the order card.
+- **Tinker Workshop** (also unlocked at the end): free sandbox where controls
+  stay live *during* the run — no targets, just cause and effect.
+- **Lab Notebook**: every unlocked concept with a diagram, the Tea-o-pedia
+  reference, and a **"Show the maths"** toggle that overlays the live formulas
+  on each stage (great for classrooms).
+- **Certificate**: add your name and print it.
+- **Accessibility**: colorblind-safe gauge markings (✓/hatching, not just
+  color), `prefers-reduced-motion` support, gentle generative music and sound
+  with separate toggles, and a rotate prompt on portrait phones.
 
 ## Tech notes
 

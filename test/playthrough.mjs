@@ -50,6 +50,8 @@ async function runStage(id, name, params, expectWin, shotPrefix, midShotAt, time
 
 await page.goto('file://' + root + '/index.html');
 await page.waitForTimeout(800);
+// pin the randomized challenge so every assertion below is deterministic
+await page.evaluate(() => window.TTM.setChallenge({ gearsBand: [60, 80], circuitBand: [40, 70], screwTarget: 100 }));
 
 // ---------- Stage 1: gears ----------
 console.log('Stage 1 — Gear Grinder');
@@ -182,6 +184,73 @@ await page.waitForTimeout(6000); await shot('stage5-montage3');
 s5 = await waitResult(25000);
 await shot('stage5-certificate');
 check('win: full machine montage completes', s5.result && s5.result.win === true, s5.result && s5.result.title);
+
+// ---------- v2 features ----------
+console.log('v2 — stars, quiz, notebook, engineer, tinker, swirl, certificate name');
+let sv = await state();
+check('per-stage stars recorded', sv.stars && sv.stars.gears >= 1 && sv.stars.circuit >= 1 && sv.stars.brew >= 1,
+  JSON.stringify(sv.stars));
+
+// quiz: correct answer path
+await page.evaluate(() => { TTM.Save.data.quiz = {}; TTM.Save.save(); Game.goto(QuizScreen, { def: STAGE_DEFS[0] }); });
+await page.waitForTimeout(300);
+await shot('quiz');
+await page.evaluate(() => TTM.answerQuiz(true));
+await page.waitForTimeout(300);
+sv = await state();
+check('quiz correct answer recorded', sv.quiz && sv.quiz.gears === true);
+// quiz: wrong answer path (kind, not recorded)
+await page.evaluate(() => { TTM.Save.data.quiz = {}; TTM.Save.save(); Game.goto(QuizScreen, { def: STAGE_DEFS[2] }); });
+await page.waitForTimeout(200);
+await page.evaluate(() => TTM.answerQuiz(false));
+await page.waitForTimeout(200);
+sv = await state();
+check('quiz wrong answer not recorded', !sv.quiz.circuit);
+
+// notebook
+await page.evaluate(() => TTM.goto('notebook'));
+await page.waitForTimeout(300);
+check('notebook opens', (await state()).screen === 'notebook');
+await shot('notebook');
+
+// randomized challenge plumbing: band [70,90] makes 16/32 (80 RPM) the winner
+await page.evaluate(() => TTM.setChallenge({ gearsBand: [70, 90] }));
+await runStage('gears', 'challenge band [70,90]: 16/32 wins at 80 RPM', { a: 16, b: 32 }, true);
+await page.evaluate(() => TTM.setChallenge({ gearsBand: [60, 80] }));
+
+// engineer mode narrows the band: 16/32 (80 RPM) now jams, 16/24 (60) still wins
+await page.evaluate(() => TTM.setEngineer(true));
+await runStage('gears', 'engineer mode: 80 RPM now out of band', { a: 16, b: 32 }, false, 'engineer', 1800);
+await runStage('gears', 'engineer mode: 60 RPM still wins', { a: 16, b: 24 }, true);
+await page.evaluate(() => TTM.setEngineer(false));
+
+// tinker sandbox: runs continuously, never reaches a verdict
+await page.evaluate(() => TTM.goto('gears', { sandbox: true }));
+await page.waitForTimeout(200);
+await page.evaluate(() => { TTM.setParams({ a: 16, b: 24 }); TTM.pressRun(); });
+await page.waitForTimeout(5000);
+sv = await state();
+check('sandbox never finishes', sv.sandbox === true && sv.phase === 'running', sv.phase);
+await shot('tinker-run');
+
+// swirl speeds up diffusion
+async function brewCAfter(ms, swirl) {
+  await page.evaluate(() => TTM.goto('brew'));
+  await page.waitForTimeout(200);
+  await page.evaluate(() => TTM.setParams({ tea: 'green', temp: 80 }));
+  await page.evaluate(() => TTM.pressRun());
+  if (swirl) await page.evaluate(() => { Game.screen.swirlT = 99; });
+  await page.waitForTimeout(ms);
+  return page.evaluate(() => Game.screen.C);
+}
+const cPlain = await brewCAfter(3000, false);
+const cSwirl = await brewCAfter(3000, true);
+check('swirl speeds up diffusion', cSwirl > cPlain + 0.02, cPlain.toFixed(3) + ' vs ' + cSwirl.toFixed(3));
+
+// certificate name
+await page.evaluate(() => TTM.setName('Ada Lovelace'));
+sv = await state();
+check('player name saved', sv.name === 'Ada Lovelace');
 
 // ---------- persistence ----------
 console.log('Persistence');

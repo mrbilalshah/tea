@@ -8,6 +8,12 @@
   html, body { margin:0; padding:0; height:100%; background:#2e2620; overflow:hidden; }
   #game { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
   canvas { display:block; touch-action:none; user-select:none; -webkit-user-select:none; cursor:default; }
+  #printCert { display:none; }
+  @media print {
+    #game { display:none; }
+    #printCert { display:block !important; font-family: Georgia, 'Times New Roman', serif;
+      text-align:center; padding:60px 40px; border:6px double #b8860b; margin:40px; }
+  }
 </style>
 </head>
 <body>
@@ -67,7 +73,34 @@ const STAGE_DEFS = [
 const STAGE_ORDER = STAGE_DEFS.map(d => d.id);
 function stageDef(id){ return STAGE_DEFS.find(d => d.id === id); }
 
+// challenge targets are re-rolled each "brew another cup" so replays differ.
+// Every option is verified to contain at least one buildable solution.
+const GEAR_BANDS = [[50, 70], [60, 80], [70, 90]];
+const CIRCUIT_BANDS = [[40, 70], [20, 35], [80, 110]];
+const SCREW_TARGETS = [90, 100, 110];
+// achievable outputs given the fixed part sets (used by Engineer Mode to narrow bands fairly)
+const GEAR_RPMS = [10, 13.3, 20, 26.7, 30, 40, 53.3, 60, 80];
+const CIRCUIT_WATTS = [3, 4, 6, 8, 12, 16, 18, 24, 32, 48, 64, 72, 96, 128, 192, 288, 384];
+function newChallenge(){
+  return {
+    gearsBand: pick(GEAR_BANDS),
+    circuitBand: pick(CIRCUIT_BANDS),
+    screwTarget: pick(SCREW_TARGETS),
+  };
+}
+// Engineer Mode: narrow a band to ±half around the achievable value nearest its centre
+function narrowBand(band, achievable, half){
+  const centre = (band[0] + band[1]) / 2;
+  const inside = achievable.filter(v => v >= band[0] && v <= band[1]);
+  if (!inside.length) return band;
+  const v = inside.reduce((a, b) => Math.abs(b - centre) < Math.abs(a - centre) ? b : a);
+  return [Math.round((v - half) * 10) / 10, Math.round((v + half) * 10) / 10];
+}
+function engineerOn(){ return !!Save.data.engineerMode; }
+
 // ===================== 2. UTILS =====================
+// reduced-motion preference damps particles, pulsing and shake game-wide
+const MOTION = (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) ? 0.3 : 1;
 function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
 function lerp(a, b, t){ return a + (b - a) * t; }
 function easeOut(t){ t = clamp(t, 0, 1); return 1 - (1 - t) * (1 - t); }
@@ -126,6 +159,7 @@ const Particles = {
   clear(){ this.list.length = 0; },
   spawn(preset, x, y, n, opts){
     opts = opts || {};
+    if (MOTION < 1 && n > 1) n = Math.max(1, Math.round(n * MOTION));
     for (let i = 0; i < n; i++) {
       const p = { preset, x, y, t: 0, life: 1, size: 4, vx: 0, vy: 0, g: 0, color: PAL.ink, rot: rand(0, TAU), vr: rand(-3, 3) };
       switch (preset) {
@@ -246,26 +280,75 @@ const SFX = {
   ding(){ this.tone(1320, 0.4, 'sine', 0.12); },
   success(){ [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.22, 'triangle', 0.12, null, i * 0.09)); },
   fail(){ this.tone(330, 0.3, 'sawtooth', 0.1, 240); this.tone(240, 0.4, 'sawtooth', 0.09, 160, 0.18); },
-  fanfare(){ [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => this.tone(f, 0.25, 'triangle', 0.12, null, i * 0.12)); }
+  fanfare(){ [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => this.tone(f, 0.25, 'triangle', 0.12, null, i * 0.12)); },
+  // tiny machine-noise ticks used during stage runs
+  ratchet(){ this.tone(rand(1800, 2200), 0.03, 'square', 0.025); },
+  whirr(){ this.tone(rand(110, 130), 0.22, 'triangle', 0.04, 90); },
+  rumble(){ this.noise(0.3, 0.08, 300); }
+};
+// Gentle generative background music (independent of SFX toggle)
+const Music = {
+  enabled: true, timer: null, step: 0,
+  pattern: [0, 2, 4, 7, 4, 2, 5, 4, 0, 2, 4, 9, 7, 4, 2, -1],
+  scale: [262, 294, 330, 392, 440, 523, 587, 659, 784, 880],
+  start(){
+    if (!this.enabled || this.timer) return;
+    try {
+      if (!SFX.ac) SFX.ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (SFX.ac.state === 'suspended') SFX.ac.resume();
+    } catch (e) { return; }
+    this.timer = setInterval(() => this.tick(), 290);
+  },
+  stop(){ if (this.timer) { clearInterval(this.timer); this.timer = null; } },
+  note(freq, dur, vol, when){
+    const ac = SFX.ac; if (!ac) return;
+    const t0 = ac.currentTime + (when || 0.02);
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'triangle'; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(ac.destination);
+    o.start(t0); o.stop(t0 + dur + 0.05);
+  },
+  tick(){
+    if (!this.enabled) { this.stop(); return; }
+    const i = this.pattern[this.step % this.pattern.length];
+    if (i >= 0) this.note(this.scale[i], 0.5, 0.028);
+    if (this.step % 8 === 0) this.note(this.scale[0] / 2, 1.1, 0.03); // soft bass
+    if (this.step % 16 === 12) this.note(this.scale[4], 0.8, 0.02, 0.15);
+    this.step++;
+  }
 };
 
 // ===================== 5. SAVE (localStorage) =====================
+const SAVE_DEFAULTS = () => ({
+  unlocked: 1, done: {}, retries: {}, attempt: {}, params: {}, stageStars: {}, quiz: {},
+  sound: true, music: true, showMath: false, engineerMode: false,
+  tea: null, brews: 0, challenge: null, playerName: ''
+});
 const Save = {
   key: 'greatTeaMachine.v1',
-  data: { unlocked: 1, done: {}, retries: {}, params: {}, sound: true, tea: null, brews: 0 },
+  data: SAVE_DEFAULTS(),
   load(){
     try {
       const raw = localStorage.getItem(this.key);
       if (raw) Object.assign(this.data, JSON.parse(raw));
     } catch (e) { /* file:// or private mode - play without saving */ }
     SFX.enabled = this.data.sound !== false;
+    Music.enabled = this.data.music !== false;
   },
   save(){
     try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) {}
   },
   reset(){
-    this.data = { unlocked: 1, done: {}, retries: {}, params: {}, sound: SFX.enabled, tea: null, brews: 0 };
+    this.data = SAVE_DEFAULTS();
+    this.data.sound = SFX.enabled; this.data.music = Music.enabled;
     this.save();
+  },
+  challenge(){
+    if (!this.data.challenge) { this.data.challenge = newChallenge(); this.save(); }
+    return this.data.challenge;
   },
   stageIndex(id){ return STAGE_ORDER.indexOf(id) + 1; },
   isUnlocked(id){ return this.stageIndex(id) <= this.data.unlocked; },
@@ -275,7 +358,11 @@ const Save = {
     this.data.unlocked = Math.max(this.data.unlocked, Math.min(this.stageIndex(id) + 1, STAGE_ORDER.length));
     this.save();
   },
-  addRetry(id){ this.data.retries[id] = (this.data.retries[id] || 0) + 1; this.save(); },
+  addRetry(id){
+    this.data.retries[id] = (this.data.retries[id] || 0) + 1;
+    this.data.attempt[id] = (this.data.attempt[id] || 0) + 1; // resets on a win; feeds stage stars
+    this.save();
+  },
   totalRetries(){ return Object.values(this.data.retries).reduce((a, b) => a + b, 0); }
 };
 
@@ -427,6 +514,22 @@ class Gauge {
     for (const b of this.bands) {
       ctx.strokeStyle = b.color; ctx.lineWidth = 10;
       ctx.beginPath(); ctx.arc(0, 0, this.r - 2, this.angleFor(b.from), this.angleFor(b.to)); ctx.stroke();
+      // never rely on colour alone: hatch danger bands, tick the safe band
+      if (b.danger) {
+        ctx.strokeStyle = 'rgba(58,44,35,0.5)'; ctx.lineWidth = 2;
+        const steps = Math.max(2, Math.round((b.to - b.from) / (this.max - this.min) * 10));
+        for (let i = 0; i <= steps; i++) {
+          const a = this.angleFor(lerp(b.from, b.to, i / steps));
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * (this.r - 7), Math.sin(a) * (this.r - 7));
+          ctx.lineTo(Math.cos(a) * (this.r + 3), Math.sin(a) * (this.r + 3));
+          ctx.stroke();
+        }
+      }
+      if (b.safe) {
+        const a = this.angleFor((b.from + b.to) / 2);
+        label(ctx, '✓', Math.cos(a) * (this.r + 13), Math.sin(a) * (this.r + 13) + 4, F(13, true), PAL.ink, 'center');
+      }
     }
     ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2;
     for (let i = 0; i <= 4; i++) {
@@ -467,6 +570,7 @@ class Meter {
       ctx.fillRect(this.x + 2, y1, this.w - 4, y2 - y1);
       ctx.strokeStyle = PAL.greenDark; ctx.lineWidth = 2;
       ctx.strokeRect(this.x + 2, y1, this.w - 4, y2 - y1);
+      label(ctx, '✓', this.x + this.w + 4, (y1 + y2) / 2 + 4, F(13, true), PAL.ink, 'left');
     }
     const t = clamp(this.shown / this.max, 0, 1);
     const fh = (this.h - 6) * t;
@@ -750,16 +854,63 @@ window.addEventListener('resize', resize);
 resize();
 
 const Game = {
-  screen: null, time: 0,
+  screen: null, time: 0, fade: 0,
   goto(screen, params){
     if (this.screen && this.screen.exit) this.screen.exit();
     Particles.clear();
     Mentor.clear();
     this.screen = screen;
+    this.fade = 0.999 * MOTION; // brief fade-in from cream on every screen change
     if (screen.enter) screen.enter(params || {});
   }
 };
-// global HUD: sound toggle (drawn on every screen, top-right corner)
+function drawStar(ctx, x, y, r, on, pulse){
+  ctx.save();
+  ctx.translate(x, y);
+  if (on && pulse) ctx.scale(pulse, pulse);
+  ctx.beginPath();
+  for (let k = 0; k < 5; k++) {
+    const a = -Math.PI / 2 + k * TAU / 5;
+    ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    ctx.lineTo(Math.cos(a + TAU / 10) * r * 0.42, Math.sin(a + TAU / 10) * r * 0.42);
+  }
+  ctx.closePath();
+  ctx.fillStyle = on ? PAL.brass : PAL.greyLite;
+  ctx.fill();
+  ctx.lineWidth = Math.max(1.5, r * 0.12); ctx.strokeStyle = PAL.ink; ctx.stroke();
+  ctx.restore();
+}
+// global HUD: sound + music toggles (drawn on every screen, top-right corner)
+const musicBtn = {
+  x: W - 90, y: 10, w: 36, h: 36,
+  down(p){
+    if (p.x >= this.x && p.x <= this.x + this.w && p.y >= this.y && p.y <= this.y + this.h) {
+      Music.enabled = !Music.enabled;
+      Save.data.music = Music.enabled; Save.save();
+      if (Music.enabled) Music.start(); else Music.stop();
+      SFX.click();
+      return true;
+    }
+    return false;
+  },
+  render(ctx){
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = PAL.cream; rr(ctx, this.x, this.y, this.w, this.h, 10); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // note glyph
+    ctx.fillStyle = PAL.ink; ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.ellipse(this.x + 13, this.y + 25, 4.5, 3.5, -0.3, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(this.x + 17, this.y + 24); ctx.lineTo(this.x + 17, this.y + 9);
+    ctx.lineTo(this.x + 27, this.y + 11); ctx.lineTo(this.x + 27, this.y + 26); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(this.x + 23, this.y + 27, 4.5, 3.5, -0.3, 0, TAU); ctx.fill();
+    if (!Music.enabled) {
+      ctx.strokeStyle = PAL.red; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(this.x + 6, this.y + 6); ctx.lineTo(this.x + 30, this.y + 30); ctx.stroke();
+    }
+    ctx.restore();
+  }
+};
 const soundBtn = {
   x: W - 46, y: 10, w: 36, h: 36,
   down(p){
@@ -803,8 +954,10 @@ function pointerPos(e){
 canvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   canvas.setPointerCapture(e.pointerId);
+  Music.start(); // browsers only allow audio after a user gesture
   const p = pointerPos(e);
   if (soundBtn.down(p)) return;
+  if (musicBtn.down(p)) return;
   if (Game.screen && Game.screen.onPointerDown) Game.screen.onPointerDown(p);
 });
 canvas.addEventListener('pointermove', e => {
@@ -824,15 +977,31 @@ function frame(tNow){
   const dt = Math.min((tNow - tPrev) / 1000, 1 / 20);
   tPrev = tNow;
   Game.time += dt;
+  ctx.setTransform(view.px, 0, 0, view.px, 0, 0);
+  // portrait phones: pause and ask for landscape
+  if (window.innerHeight > window.innerWidth && window.innerWidth < 700) {
+    ctx.fillStyle = PAL.bg; ctx.fillRect(0, 0, W, H);
+    drawPekoe(ctx, W / 2, H / 2 - 90, 1.6, 'think', Game.time);
+    label(ctx, 'Please rotate your device!', W / 2, H / 2 + 20, F(30, true), PAL.ink, 'center');
+    label(ctx, 'The Tea Machine needs a landscape workshop ☕', W / 2, H / 2 + 56, F(17), PAL.woodDark, 'center');
+    requestAnimationFrame(frame);
+    return;
+  }
   if (Game.screen) {
     if (Game.screen.update) Game.screen.update(dt);
     Particles.update(dt);
     Mentor.update(dt);
-    ctx.setTransform(view.px, 0, 0, view.px, 0, 0);
     ctx.fillStyle = PAL.bg;
     ctx.fillRect(0, 0, W, H);
     if (Game.screen.render) Game.screen.render(ctx);
     soundBtn.render(ctx);
+    musicBtn.render(ctx);
+    if (Game.fade > 0) {
+      Game.fade -= dt * 4;
+      ctx.globalAlpha = clamp(Game.fade, 0, 1);
+      ctx.fillStyle = PAL.bg; ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+    }
   }
   requestAnimationFrame(frame);
 }
@@ -858,8 +1027,9 @@ class StageBase {
     this.def = def;
     this.phase = 'build'; // build | running | result
   }
-  enter(){
+  enter(params){
     this.phase = 'build';
+    this.sandbox = !!(params && params.sandbox);
     this.runT = 0;
     this.result = null;
     this.t = 0;
@@ -881,7 +1051,7 @@ class StageBase {
     if (this.phase !== 'build') return;
     this.phase = 'running';
     this.runT = 0;
-    this.ui.setDisabled(true);
+    if (!this.sandbox) this.ui.setDisabled(true); // tinker mode keeps controls live
     this.startRun();
   }
   startRun(){}
@@ -896,9 +1066,23 @@ class StageBase {
   onBackToBuild(){}
   finish(win, title, line, pose){
     if (this.phase === 'result') return;
+    if (this.sandbox) {
+      // tinker mode: no verdicts — toast the outcome and keep the machine running
+      Mentor.say(title + ' ' + line, pose || (win ? 'happy' : 'think'));
+      if (win) SFX.ding(); else SFX.thunk();
+      this.runT = 0;
+      this.startRun();
+      return;
+    }
     this.phase = 'result';
     this.result = { win, title, line };
     if (win) {
+      const att = Save.data.attempt[this.def.id] || 0;
+      const prec = this.precision ? clamp(this.precision(), 0, 1) : 1;
+      const stars = (att === 0 && prec >= 0.5) ? 3 : att <= 2 ? 2 : 1;
+      this.result.stars = stars;
+      Save.data.stageStars[this.def.id] = Math.max(Save.data.stageStars[this.def.id] || 0, stars);
+      Save.data.attempt[this.def.id] = 0;
       SFX.success();
       Save.markDone(this.def.id, this.winParams ? this.winParams() : null);
       Mentor.say(line, pose || 'cheer');
@@ -932,7 +1116,26 @@ class StageBase {
     ctx.save();
     label(ctx, 'STAGE ' + this.def.num + ' · ' + this.def.field.toUpperCase(), W / 2, 24, F(13, true), PAL.tealDark, 'center');
     label(ctx, this.def.name, W / 2, 48, F(26, true), PAL.ink, 'center');
+    if (this.sandbox) {
+      label(ctx, '🔧 TINKER MODE — no scores, just science', W / 2, 68, F(13, true), PAL.amber, 'center');
+    } else if (engineerOn()) {
+      label(ctx, '⚙ ENGINEER MODE', W / 2, 68, F(13, true), PAL.redDark, 'center');
+    }
     ctx.restore();
+    // live maths strip (classroom toggle)
+    if (Save.data.showMath && this.mathText) {
+      const txt = this.mathText();
+      if (txt) {
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        ctx.font = F(13, true);
+        const tw = ctx.measureText(txt).width;
+        ctx.fillStyle = '#2f4858';
+        rr(ctx, W - tw - 130, 54, tw + 20, 26, 8); ctx.fill();
+        label(ctx, txt, W - 120, 71, F(13, true), '#bfe3dd', 'right');
+        ctx.restore();
+      }
+    }
     this.backBtn.render(ctx);
     if (this.phase === 'build') this.runBtn.render(ctx);
     Mentor.render(ctx);
@@ -941,11 +1144,17 @@ class StageBase {
   renderWorld(ctx){}
   renderResult(ctx){
     const r = this.result;
-    const pw = 480, ph = 150, px = W / 2 - pw / 2, py = 120;
+    const pw = 480, ph = r.win ? 178 : 150, px = W / 2 - pw / 2, py = 120;
     ctx.save();
     panel(ctx, px, py, pw, ph, 18, r.win ? '#eaf6df' : '#fbe9e4', r.win ? PAL.greenDark : PAL.redDark);
     label(ctx, r.title, W / 2, py + 44, F(30, true), r.win ? PAL.greenDark : PAL.redDark, 'center');
     drawWrapped(ctx, r.line, W / 2, py + 66, pw - 60, 20, F(15), PAL.ink, 'center');
+    if (r.win && r.stars) {
+      for (let i = 0; i < 3; i++) {
+        drawStar(ctx, W / 2 + (i - 1) * 44, py + ph - 26, 15, i < r.stars,
+          i < r.stars ? 1 + Math.sin(this.t * 3 + i) * 0.08 * MOTION : 1);
+      }
+    }
     ctx.restore();
     this.tweakBtn.y = py + ph - 8; this.nextBtn.y = py + ph - 8;
     if (r.win) {
@@ -966,14 +1175,23 @@ class StageBase {
       return;
     }
     if (this.backBtn.down(p)) return;
-    if (this.phase === 'build') {
-      if (this.runBtn.down(p)) return;
+    const interactive = this.phase === 'build' || (this.sandbox && this.phase === 'running');
+    if (interactive) {
+      if (this.phase === 'build' && this.runBtn.down(p)) return;
       if (this.ui.down(p)) return;
       this.worldDown(p);
     }
   }
-  onPointerMove(p){ if (this.phase === 'build') { if (!this.ui.move(p)) this.worldMove(p); } }
-  onPointerUp(p){ if (this.phase === 'build') { this.ui.up(p); this.worldUp(p); } }
+  onPointerMove(p){
+    if (this.phase === 'build' || (this.sandbox && this.phase === 'running')) {
+      if (!this.ui.move(p)) this.worldMove(p);
+    }
+  }
+  onPointerUp(p){
+    if (this.phase === 'build' || (this.sandbox && this.phase === 'running')) {
+      this.ui.up(p); this.worldUp(p);
+    }
+  }
   worldDown(p){} worldMove(p){} worldUp(p){}
   onKey(k){
     if (k === 'Escape') Game.goto(MapScreen);
@@ -993,15 +1211,21 @@ const TitleScreen = {
     this.confirmReset = false;
     this.startBtn = new Button({ x: W / 2 - 110, y: 400, w: 220, h: 64, text: 'START', style: 'go', fontSize: 28,
       onClick: () => Game.goto(MapScreen) });
-    this.resetBtn = new Button({ x: W / 2 - 110, y: 546, w: 220, h: 36, text: 'Reset progress', style: 'plain', fontSize: 14,
+    this.resetBtn = new Button({ x: W / 2 + 16, y: 546, w: 214, h: 36, text: 'Reset progress', style: 'plain', fontSize: 14,
       onClick: () => {
         if (this.confirmReset) { Save.reset(); this.confirmReset = false; this.resetBtn.text = 'Reset progress'; }
         else { this.confirmReset = true; this.resetBtn.text = 'Really erase? Tap again'; }
       } });
+    this.mathBtn = new Button({ x: W / 2 - 230, y: 546, w: 214, h: 36, style: 'plain', fontSize: 14,
+      text: '∑ Show maths: ' + (Save.data.showMath ? 'ON' : 'OFF'),
+      onClick: () => {
+        Save.data.showMath = !Save.data.showMath; Save.save();
+        this.mathBtn.text = '∑ Show maths: ' + (Save.data.showMath ? 'ON' : 'OFF');
+      } });
   },
   update(dt){
     this.t += dt;
-    this.startBtn.update(dt); this.resetBtn.update(dt);
+    this.startBtn.update(dt); this.resetBtn.update(dt); this.mathBtn.update(dt);
     if (Math.random() < dt * 4) Particles.spawn('steam', W / 2 - 74 + rand(-6, 6), 232, 1);
   },
   render(ctx){
@@ -1029,11 +1253,13 @@ const TitleScreen = {
     label(ctx, 'Use mechanical, electrical & chemical engineering to make the perfect cup of tea!', W / 2, 508, F(15), PAL.ink, 'center');
     this.startBtn.render(ctx);
     this.resetBtn.render(ctx);
+    this.mathBtn.render(ctx);
     drawPekoe(ctx, 90, H - 120, 1.4, 'happy', this.t);
   },
   onPointerDown(p){
     if (this.startBtn.down(p)) return;
     if (this.resetBtn.down(p)) return;
+    if (this.mathBtn.down(p)) return;
     this.confirmReset = false; this.resetBtn.text = 'Reset progress';
   },
   onPointerMove(){}, onPointerUp(){},
@@ -1049,6 +1275,24 @@ const MapScreen = {
       x: 140 + i * 170,
       y: i % 2 === 0 ? 270 : 380,
     }));
+    this.menu = new UIGroup();
+    this.menu.add(new Button({ x: W - 172, y: 58, w: 158, h: 38, text: '📓 Lab Notebook', style: 'plain', fontSize: 14,
+      onClick: () => Game.goto(NotebookScreen) }));
+    if (Save.data.done.assembly) {
+      const engBtn = new Button({ x: W - 172, y: 104, w: 158, h: 38, style: 'plain', fontSize: 14,
+        text: '⚙ Engineer: ' + (engineerOn() ? 'ON' : 'OFF'),
+        onClick: () => {
+          Save.data.engineerMode = !Save.data.engineerMode;
+          Save.save();
+          engBtn.text = '⚙ Engineer: ' + (engineerOn() ? 'ON' : 'OFF');
+          Mentor.say(engineerOn()
+            ? 'Engineer Mode ON: narrower targets, no recipe hints on the order card. Real precision work — good luck!'
+            : 'Engineer Mode off. Back to comfortable tolerances!', engineerOn() ? 'shock' : 'happy');
+        } });
+      this.menu.add(engBtn);
+      this.menu.add(new Button({ x: W - 172, y: 150, w: 158, h: 38, text: '🔧 Tinker Workshop', style: 'plain', fontSize: 14,
+        onClick: () => Game.goto(TinkerScreen) }));
+    }
     const next = STAGE_ORDER[Math.min(Save.data.unlocked, STAGE_ORDER.length) - 1];
     const d = stageDef(next);
     if (Save.data.done.assembly) {
@@ -1113,8 +1357,13 @@ const MapScreen = {
       }
       label(ctx, 'STAGE ' + n.def.num, 0, 66, F(12, true), PAL.woodDark, 'center');
       label(ctx, n.def.name, 0, 84, F(16, true), unlocked ? PAL.ink : PAL.grey, 'center');
+      if (done) {
+        const st = Save.data.stageStars[n.def.id] || 0;
+        for (let i = 0; i < 3; i++) drawStar(ctx, (i - 1) * 20, 102, 8, i < st);
+      }
       ctx.restore();
     }
+    this.menu.render(ctx);
     Mentor.render(ctx);
     // back to title
     this._backBtn = this._backBtn || new Button({ x: 14, y: 10, w: 88, h: 38, text: '← Title', style: 'plain', fontSize: 15,
@@ -1172,6 +1421,7 @@ const MapScreen = {
   },
   onPointerDown(p){
     if (this._backBtn && this._backBtn.down(p)) return;
+    if (this.menu.down(p)) return;
     for (const n of this.nodes) {
       const dx = p.x - n.x, dy = p.y - n.y;
       if (dx * dx + dy * dy < 52 * 52) {
@@ -1196,17 +1446,54 @@ const MapScreen = {
   }
 };
 
-// ===================== 13. CONCEPT CARD SCREEN =====================
+// ===================== 13. CONCEPT CARD / QUIZ / NOTEBOOK / TINKER =====================
+function gotoAfterConcept(def){
+  const idx = Save.stageIndex(def.id);
+  const nextId = STAGE_ORDER[idx]; // idx is 1-based, so this is the next stage
+  Game.goto(nextId ? STAGES[nextId] : MapScreen);
+}
+const QUIZ = {
+  gears: {
+    q: 'A BIG gear (24 teeth) turns a SMALL gear (12 teeth). What does the small gear do?',
+    options: ['Spins twice as FAST, with less force', 'Spins twice as SLOW, with more force', 'Spins at exactly the same speed'],
+    correct: 0,
+    explain: 'Half the teeth means it must go around twice for every turn of the big gear — faster, but with less force.'
+  },
+  screw: {
+    q: 'Why does an Archimedes screw lift tea uphill?',
+    options: ['It is a ramp wrapped around a pole — each turn is one step up', 'It magnetises the tea leaves', 'It blows air underneath the tea'],
+    correct: 0,
+    explain: 'Unroll the thread and you get a simple ramp. Turning the screw walks the material up that ramp, one step per turn.'
+  },
+  circuit: {
+    q: 'Two heating coils connected in PARALLEL have…',
+    options: ['LESS total resistance, so MORE current flows', 'MORE total resistance, so less current flows', 'No resistance at all'],
+    correct: 0,
+    explain: 'Parallel paths are like opening a second door: more ways through = less resistance = more current (and more heat!).'
+  },
+  brew: {
+    q: 'Why does tea brew faster in hot water?',
+    options: ['Hot molecules move faster, so diffusion speeds up', 'Hot water is heavier and squashes the leaves', 'The leaves are afraid of the heat'],
+    correct: 0,
+    explain: 'Diffusion is molecules bumping around from crowded to empty places. Heat makes them bump faster.'
+  },
+  assembly: {
+    q: 'In a machine made of many systems, what happens if ONE stage fails?',
+    options: ['The whole machine fails — every link matters', 'Only that stage is affected', 'The other stages speed up to fix it'],
+    correct: 0,
+    explain: 'A system is a chain of links: grind, lift, boil, brew. Break any link and there is no tea. That is systems thinking!'
+  },
+};
 const ConceptScreen = {
   enter(params){
     this.def = params.def;
     this.t = 0;
-    const idx = Save.stageIndex(this.def.id);
-    const nextId = STAGE_ORDER[idx]; // idx is 1-based, so this is the next stage
+    const def = this.def;
+    const hasQuiz = QUIZ[def.id] && !Save.data.quiz[def.id];
     this.contBtn = new Button({
       x: W / 2 - 110, y: 470, w: 220, h: 56, style: 'go', fontSize: 20,
-      text: nextId ? 'Next stage →' : 'To the map!',
-      onClick: () => Game.goto(nextId ? STAGES[nextId] : MapScreen)
+      text: hasQuiz ? 'Quick question! →' : (STAGE_ORDER[Save.stageIndex(def.id)] ? 'Next stage →' : 'To the map!'),
+      onClick: () => hasQuiz ? Game.goto(QuizScreen, { def }) : gotoAfterConcept(def)
     });
     SFX.ding();
   },
@@ -1236,6 +1523,249 @@ const ConceptScreen = {
   onPointerDown(p){ this.contBtn.down(p); },
   onPointerMove(){}, onPointerUp(){},
   onKey(k){ if (k === 'Enter') this.contBtn.onClick(); }
+};
+
+const QuizScreen = {
+  enter(params){
+    this.def = params.def;
+    this.quiz = QUIZ[this.def.id];
+    this.t = 0;
+    this.answered = null; // index picked
+    // shuffle options, remember where the right one landed
+    const order = this.quiz.options.map((_, i) => i).sort(() => Math.random() - 0.5);
+    this.options = order.map(i => this.quiz.options[i]);
+    this.correctIdx = order.indexOf(this.quiz.correct);
+    this.optBtns = this.options.map((txt, i) => new Button({
+      x: W / 2 - 280, y: 218 + i * 74, w: 560, h: 60, text: '', style: 'plain', fontSize: 16,
+      onClick: () => this.answer(i)
+    }));
+    this.contBtn = new Button({ x: W - 236, y: 520, w: 220, h: 52, style: 'go', fontSize: 18,
+      text: 'Continue →', visible: false, onClick: () => gotoAfterConcept(this.def) });
+  },
+  answer(i){
+    if (this.answered !== null) return;
+    this.answered = i;
+    if (i === this.correctIdx) {
+      Save.data.quiz[this.def.id] = true;
+      Save.save();
+      SFX.success();
+      Particles.spawn('confetti', W / 2, 200, 24);
+      Mentor.say('Exactly right! ' + this.quiz.explain, 'cheer');
+    } else {
+      SFX.thunk();
+      Mentor.say('Not quite — no worries! ' + this.quiz.explain, 'think');
+    }
+    this.contBtn.visible = true;
+  },
+  update(dt){
+    this.t += dt;
+    this.optBtns.forEach(b => b.update(dt));
+    this.contBtn.update(dt);
+  },
+  render(ctx){
+    drawBackdrop(ctx);
+    label(ctx, '🔍 QUICK QUESTION', W / 2, 80, F(16, true), PAL.amber, 'center');
+    panel(ctx, W / 2 - 320, 104, 640, 92, 16, PAL.paper);
+    drawWrapped(ctx, this.quiz.q, W / 2, 128, 580, 22, F(17, true), PAL.ink, 'center');
+    this.optBtns.forEach((b, i) => {
+      if (this.answered !== null) {
+        if (i === this.correctIdx) b.style = 'go';
+        else if (i === this.answered) b.style = 'danger';
+        b.disabled = true;
+      }
+      b.render(ctx);
+      label(ctx, String.fromCharCode(65 + i) + ')  ' + this.options[i], b.x + 24, b.y + b.h / 2 + 5,
+        F(15, true), this.answered !== null && (i === this.correctIdx || i === this.answered) ? '#fff' : PAL.ink, 'left');
+    });
+    Particles.render(ctx);
+    Mentor.render(ctx);
+    this.contBtn.render(ctx);
+  },
+  onPointerDown(p){
+    if (this.contBtn.down(p)) return;
+    for (const b of this.optBtns) if (b.down(p)) return;
+  },
+  onPointerMove(){}, onPointerUp(){},
+  onKey(k){ if (k === 'Enter' && this.answered !== null) this.contBtn.onClick(); }
+};
+
+function drawConceptDiagram(ctx, id, cx, cy, t){
+  ctx.save();
+  ctx.translate(cx, cy);
+  switch (id) {
+    case 'gears':
+      drawGear(ctx, -60, 0, 20, 46, t * 0.7, PAL.brass);
+      drawGear(ctx, 12, 0, 10, 24, -t * 1.4 + 0.31, PAL.copper);
+      label(ctx, '20 RPM ↻', -60, 72, F(13, true), PAL.ink, 'center');
+      label(ctx, '40 RPM ↺', 12, 72, F(13, true), PAL.tealDark, 'center');
+      label(ctx, 'half the teeth → double the speed', -20, -66, F(13), PAL.woodDark, 'center');
+      break;
+    case 'screw': {
+      // the ramp…
+      ctx.strokeStyle = PAL.ink; ctx.lineWidth = 3;
+      ctx.fillStyle = PAL.bgDark;
+      ctx.beginPath(); ctx.moveTo(-150, 40); ctx.lineTo(-30, 40); ctx.lineTo(-30, -30); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      label(ctx, 'a ramp…', -90, 62, F(13), PAL.woodDark, 'center');
+      // …wrapped around a pole
+      ctx.save(); ctx.translate(80, 0); ctx.rotate(-0.5);
+      ctx.fillStyle = PAL.copper; rr(ctx, -16, -55, 32, 110, 10); ctx.fill(); ctx.stroke();
+      ctx.lineWidth = 2.5;
+      for (let i = 0; i < 5; i++) {
+        ctx.beginPath(); ctx.moveTo(-16, -48 + i * 22); ctx.lineTo(16, -38 + i * 22); ctx.stroke();
+      }
+      ctx.restore();
+      label(ctx, '…wrapped around a pole!', 74, 62, F(13), PAL.woodDark, 'center');
+      break;
+    }
+    case 'circuit':
+      // simple loop: battery left, resistor top
+      ctx.strokeStyle = PAL.copper; ctx.lineWidth = 4; ctx.lineJoin = 'round';
+      ctx.strokeRect(-110, -40, 220, 80);
+      ctx.fillStyle = PAL.bg;
+      ctx.fillRect(-20, -52, 90, 24); // gap for resistor
+      ctx.strokeStyle = '#8a4b2c'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(-20, -40);
+      for (let i = 0; i < 4; i++) ctx.lineTo(-10 + i * 18, i % 2 ? -50 : -30);
+      ctx.lineTo(70, -40); ctx.stroke();
+      ctx.fillStyle = PAL.ink;
+      ctx.fillRect(-118, -18, 16, 8); ctx.fillRect(-114, 10, 8, 8);
+      label(ctx, 'V', -136, 2, F(16, true), PAL.tealDark, 'center');
+      label(ctx, 'R', 25, -60, F(16, true), PAL.redDark, 'center');
+      label(ctx, 'I →', 0, 62, F(16, true), PAL.amber, 'center');
+      label(ctx, 'I = V ÷ R    ·    P = V × I', 0, 92, F(14, true), PAL.ink, 'center');
+      break;
+    case 'brew': {
+      ctx.strokeStyle = PAL.ink; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(-80, 0, 52, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(80, 0, 52, 0, TAU); ctx.stroke();
+      ctx.fillStyle = PAL.tea;
+      for (let i = 0; i < 14; i++) {
+        const a = i * 2.4, rr1 = (i % 5) * 4;
+        ctx.beginPath(); ctx.arc(-80 + Math.cos(a) * rr1, Math.sin(a) * rr1, 3.4, 0, TAU); ctx.fill();
+      }
+      for (let i = 0; i < 14; i++) {
+        const a = i * 2.4, rr2 = 10 + (i * 7) % 38;
+        ctx.beginPath(); ctx.arc(80 + Math.cos(a) * rr2, Math.sin(a) * rr2, 3.4, 0, TAU); ctx.fill();
+      }
+      label(ctx, '→', 0, 8, F(30, true), PAL.ink, 'center');
+      label(ctx, 'crowded', -80, 74, F(13), PAL.woodDark, 'center');
+      label(ctx, 'spread out evenly', 80, 74, F(13), PAL.woodDark, 'center');
+      break;
+    }
+    case 'assembly': {
+      const names = ['GRIND', 'LIFT', 'BOIL', 'BREW', '☕'];
+      for (let i = 0; i < 5; i++) {
+        const bx = -170 + i * 80;
+        ctx.fillStyle = i === 4 ? PAL.brass : PAL.teal;
+        rr(ctx, bx - 28, -22, 56, 44, 8); ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        label(ctx, names[i], bx, 5, F(12, true), '#fff', 'center');
+        if (i < 4) label(ctx, '→', bx + 40, 6, F(18, true), PAL.ink, 'center');
+      }
+      label(ctx, 'every link matters', 0, 56, F(13), PAL.woodDark, 'center');
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+const NotebookScreen = {
+  enter(){
+    this.t = 0;
+    this.sel = 0;
+    this.backBtn = new Button({ x: 14, y: 10, w: 88, h: 38, text: '← Map', style: 'plain', fontSize: 15,
+      onClick: () => Game.goto(MapScreen) });
+    this.mathBtn = new Button({ x: 120, y: 520, w: 220, h: 42, style: 'plain', fontSize: 14,
+      text: '∑ Show maths: ' + (Save.data.showMath ? 'ON' : 'OFF'),
+      onClick: () => {
+        Save.data.showMath = !Save.data.showMath; Save.save();
+        this.mathBtn.text = '∑ Show maths: ' + (Save.data.showMath ? 'ON' : 'OFF');
+      } });
+  },
+  update(dt){ this.t += dt; this.backBtn.update(dt); this.mathBtn.update(dt); },
+  render(ctx){
+    drawBackdrop(ctx);
+    label(ctx, '📓 PROFESSOR PEKOE’S LAB NOTEBOOK', W / 2, 44, F(22, true), PAL.ink, 'center');
+    // left: concept list + tea reference
+    panel(ctx, 110, 70, 250, 300, 14, PAL.paper);
+    STAGE_DEFS.forEach((d, i) => {
+      const y = 92 + i * 56;
+      const unlocked = !!Save.data.done[d.id];
+      if (i === this.sel) {
+        ctx.fillStyle = 'rgba(63,168,160,0.2)';
+        rr(ctx, 122, y - 8, 226, 50, 10); ctx.fill();
+      }
+      label(ctx, (unlocked ? '✔ ' : '🔒 ') + (unlocked ? d.concept : '???'), 136, y + 14, F(15, true),
+        unlocked ? PAL.ink : PAL.grey, 'left');
+      label(ctx, 'Stage ' + d.num + ' · ' + d.field, 136, y + 33, F(12),
+        unlocked ? PAL.woodDark : PAL.greyLite, 'left');
+      if (Save.data.quiz[d.id]) label(ctx, '★', 332, y + 20, F(16, true), PAL.amber, 'center');
+    });
+    // tea reference (always available — fair play for Engineer Mode)
+    panel(ctx, 110, 384, 250, 122, 14, '#fdf1d6');
+    label(ctx, 'TEA-O-PEDIA', 235, 406, F(13, true), PAL.redDark, 'center');
+    TEAS.forEach((tt, i) => {
+      label(ctx, tt.name, 128, 430 + i * 24, F(13, true), PAL.ink, 'left');
+      label(ctx, tt.idealT[0] + '–' + tt.idealT[1] + '°C · ' + tt.steep[0] + '–' + tt.steep[1] + ' min', 344, 430 + i * 24, F(13), PAL.woodDark, 'right');
+    });
+    // right: selected concept
+    const d = STAGE_DEFS[this.sel];
+    panel(ctx, 386, 70, 552, 436, 16, PAL.cream);
+    if (Save.data.done[d.id]) {
+      label(ctx, d.concept, 662, 108, F(26, true), PAL.tealDark, 'center');
+      drawConceptDiagram(ctx, d.id, 662, 220, this.t);
+      drawWrapped(ctx, d.conceptText, 662, 330, 480, 22, F(15), PAL.ink, 'center');
+      label(ctx, Save.data.quiz[d.id] ? '★ quiz answered!' : 'quiz still waiting for you', 662, 480,
+        F(13, true), Save.data.quiz[d.id] ? PAL.amber : PAL.grey, 'center');
+    } else {
+      label(ctx, '???', 662, 250, F(60, true), PAL.greyLite, 'center');
+      label(ctx, 'Complete Stage ' + d.num + ' to unlock this page!', 662, 300, F(16), PAL.grey, 'center');
+    }
+    this.backBtn.render(ctx);
+    this.mathBtn.render(ctx);
+  },
+  onPointerDown(p){
+    if (this.backBtn.down(p)) return;
+    if (this.mathBtn.down(p)) return;
+    if (p.x > 110 && p.x < 360 && p.y > 84 && p.y < 370) {
+      const i = Math.floor((p.y - 84) / 56);
+      if (i >= 0 && i < 5) { this.sel = i; SFX.click(); }
+    }
+  },
+  onPointerMove(){}, onPointerUp(){},
+  onKey(k){ if (k === 'Escape') Game.goto(MapScreen); }
+};
+
+const TinkerScreen = {
+  enter(){
+    this.t = 0;
+    this.backBtn = new Button({ x: 14, y: 10, w: 88, h: 38, text: '← Map', style: 'plain', fontSize: 15,
+      onClick: () => Game.goto(MapScreen) });
+    this.btns = STAGE_DEFS.slice(0, 4).map((d, i) => new Button({
+      x: W / 2 - 260 + (i % 2) * 280, y: 210 + Math.floor(i / 2) * 90, w: 240, h: 66,
+      text: d.name, style: 'primary', fontSize: 19,
+      onClick: () => Game.goto(STAGES[d.id], { sandbox: true })
+    }));
+    Mentor.say('Welcome to the Tinker Workshop! No targets, no scores — change anything WHILE it runs and watch what the machine does. That’s how engineers really learn.', 'happy');
+  },
+  update(dt){ this.t += dt; this.backBtn.update(dt); this.btns.forEach(b => b.update(dt)); },
+  render(ctx){
+    drawBackdrop(ctx);
+    label(ctx, '🔧 TINKER WORKSHOP', W / 2, 90, F(30, true), PAL.ink, 'center');
+    label(ctx, 'Free experimentation — controls stay live during the run!', W / 2, 122, F(15), PAL.woodDark, 'center');
+    drawGear(ctx, 130, 200, 14, 40, this.t, PAL.brass);
+    drawGear(ctx, 830, 210, 18, 50, -this.t * 0.7, PAL.teal);
+    this.btns.forEach(b => b.render(ctx));
+    Mentor.render(ctx);
+    this.backBtn.render(ctx);
+  },
+  onPointerDown(p){
+    if (this.backBtn.down(p)) return;
+    for (const b of this.btns) if (b.down(p)) return;
+  },
+  onPointerMove(){}, onPointerUp(){},
+  onKey(k){ if (k === 'Escape') Game.goto(MapScreen); }
 };
 
 // ===================== 14. STAGES =====================
@@ -1284,13 +1814,28 @@ class Stage1Gears extends StageBase {
     this.dashOff = 0;
     this.jammed = false;
     this.leafShake = 0;
+    let band = Save.challenge().gearsBand;
+    if (engineerOn()) band = narrowBand(band, GEAR_RPMS, 5);
+    this.band = band;
     this.rpmGauge = this.ui.add(new Gauge({ x: 775, y: 165, r: 48, min: 0, max: 120, unit: 'RPM', label: 'Grinder speed',
-      bands: [{ from: 0, to: 60, color: PAL.greyLite }, { from: 60, to: 80, color: PAL.green }, { from: 80, to: 120, color: PAL.red }] }));
+      bands: [{ from: 0, to: band[0], color: PAL.greyLite },
+              { from: band[0], to: band[1], color: PAL.green, safe: true },
+              { from: band[1], to: 120, color: PAL.red, danger: true }] }));
     this.tqGauge = this.ui.add(new Gauge({ x: 895, y: 165, r: 48, min: 0, max: 100, unit: '%', label: 'Grinding force',
-      bands: [{ from: 0, to: 20, color: PAL.red }, { from: 20, to: 100, color: PAL.green }] }));
+      bands: [{ from: 0, to: 20, color: PAL.red, danger: true }, { from: 20, to: 100, color: PAL.green, safe: true }] }));
   }
   sayIntro(){
-    Mentor.say('The crank turns at only 20 RPM but the grinder needs 60–80 RPM! Drag two gears onto the middle axle — they spin TOGETHER. Small back gear = the axle spins faster. Big front gear = the grinder spins faster still!', 'idle');
+    Mentor.say('The crank turns at only 20 RPM but the grinder needs ' + this.band[0] + '–' + this.band[1] + ' RPM! Drag two gears onto the middle axle — they spin TOGETHER. Small back gear = the axle spins faster. Big front gear = the grinder spins faster still!', 'idle');
+  }
+  precision(){
+    const c = this.calc();
+    const half = (this.band[1] - this.band[0]) / 2;
+    return 1 - Math.abs(c.rpm - (this.band[0] + this.band[1]) / 2) / half;
+  }
+  mathText(){
+    const A = this.gearIn('a'), B = this.gearIn('b');
+    if (!A || !B) return 'RPM = 20 × (24 ÷ back) × (front ÷ 12)';
+    return 'RPM = 20 × (24÷' + A.teeth + ') × (' + B.teeth + '÷12) = ' + Math.round(this.calc().rpm);
   }
   gearIn(loc){ return this.gears.find(g => g.loc === loc) || null; }
   calc(){
@@ -1326,14 +1871,16 @@ class Stage1Gears extends StageBase {
     }
     this.rpmGauge.value = c.ok ? c.rpm * spin : 0;
     this.tqGauge.value = c.ok ? c.torque * 100 * spin : 0;
+    if (this.sandbox) this.target = this.calc(); // live retuning while it spins
+    if (Math.random() < dt * 6 && c.ok && !this.jammed) SFX.ratchet();
     // events
-    if (!this.jammed && c.ok && c.rpm > 80 && this.runT > 1.4) {
+    if (!this.jammed && c.ok && c.rpm > this.band[1] && this.runT > 1.4) {
       this.jammed = true;
       SFX.boing();
       Particles.spawn('puff', 790, 290, 14);
       this.leafShake = 1;
     }
-    if (c.ok && c.rpm >= 60 && c.rpm <= 80 && c.torque >= 0.2 && this.runT > 1.2) {
+    if (c.ok && c.rpm >= this.band[0] && c.rpm <= this.band[1] && c.torque >= 0.2 && this.runT > 1.2) {
       // grinding! crumbs fall into the jar
       if (Math.random() < dt * 30) Particles.spawn('crumb', 795 + rand(-10, 10), 415, 2);
       if (Math.random() < dt * 8) SFX.bubble();
@@ -1344,7 +1891,7 @@ class Stage1Gears extends StageBase {
         this.finish(false, 'NOTHING MOVES!', 'The chain has nothing to grab — put a gear in BOTH slots of the middle axle.', 'think');
       } else if (this.jammed) {
         this.finish(false, 'JAMMED!', Math.round(c.rpm) + ' RPM is too fast and too feeble — the grinder choked. Gear it down a notch.', 'shock');
-      } else if (c.rpm < 60) {
+      } else if (c.rpm < this.band[0]) {
         this.finish(false, 'TOO SLOW…', 'Only ' + Math.round(c.rpm) + ' RPM — the leaves just laugh at us. Smaller BACK gear or bigger FRONT gear!', 'sad');
       } else if (c.torque < 0.2) {
         this.finish(false, 'TOO WEAK!', 'Fast, but no muscle — the grinder stalls on the first leaf. Try a different combo.', 'sad');
@@ -1482,7 +2029,7 @@ class Stage1Gears extends StageBase {
     ctx.fillStyle = 'rgba(215,235,230,0.65)';
     rr(ctx, 762, 420, 66, 76, 8); ctx.fill();
     ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
-    const jarFill = (this.phase === 'result' && this.result.win) ? 0.55 : (this.phase === 'running' && this.target && this.target.ok && this.target.rpm >= 60 && this.target.rpm <= 80 ? clamp((this.runT - 1.2) / 2.4, 0, 1) * 0.5 : 0);
+    const jarFill = (this.phase === 'result' && this.result.win) ? 0.55 : (this.phase === 'running' && this.target && this.target.ok && this.target.rpm >= this.band[0] && this.target.rpm <= this.band[1] ? clamp((this.runT - 1.2) / 2.4, 0, 1) * 0.5 : 0);
     if (jarFill > 0.02) {
       ctx.fillStyle = '#5d4020';
       rr(ctx, 766, 420 + 72 * (1 - jarFill), 58, 72 * jarFill, 5); ctx.fill();
@@ -1568,13 +2115,20 @@ class Stage2Screw extends StageBase {
       value: saved.speed || 1, format: v => '×' + v }));
     this.pitch = this.ui.add(new Selector({ x: 150, y: 242, w: 190, h: 38, label: 'Thread pitch',
       options: SCREW_PITCHES.map((p, i) => ({ label: p.label, value: i })), index: saved.pitch != null ? saved.pitch : 1 }));
-    this.potMeter = this.ui.add(new Meter({ x: 872, y: 130, w: 36, h: 170, max: 120, band: [100, 120], color: '#5d4020',
+    this.target = Save.challenge().screwTarget;
+    this.spillLimit = engineerOn() ? 15 : 30;
+    this.potMeter = this.ui.add(new Meter({ x: 872, y: 130, w: 36, h: 170, max: 120, band: [this.target, 120], color: '#5d4020',
       label: 'In the pot', format: v => Math.round(v) + ' g' }));
-    this.spillMeter = this.ui.add(new Meter({ x: 810, y: 130, w: 22, h: 170, max: 60, band: [0, 30], color: PAL.red,
+    this.spillMeter = this.ui.add(new Meter({ x: 810, y: 130, w: 22, h: 170, max: 60, band: [0, this.spillLimit], color: PAL.red,
       label: 'Spilled', format: v => Math.round(v) + ' g' }));
   }
   sayIntro(){
-    Mentor.say('Archimedes to the rescue! This screw is a ramp wrapped around a pole — each turn carries tea one step up. Lift 100 g into the pot in 15 seconds. Steeper is shorter… but tea slips back. And spinning fast gets MESSY!', 'idle');
+    Mentor.say('Archimedes to the rescue! This screw is a ramp wrapped around a pole — each turn carries tea one step up. Lift ' + this.target + ' g into the pot in 15 seconds, spilling at most ' + this.spillLimit + ' g. Steeper is shorter… but tea slips back. And spinning fast gets MESSY!', 'idle');
+  }
+  precision(){ return 1 - this.spilled / this.spillLimit; }
+  mathText(){
+    const r = this.rates();
+    return 'rate = base × speed × eff(angle) = ' + fmt1(r.del) + ' g/s';
   }
   setParams(o){
     if (o.tilt != null) this.tilt.value = o.tilt;
@@ -1623,11 +2177,12 @@ class Stage2Screw extends StageBase {
       const f = rand(0.3, 0.8);
       Particles.spawn('puff', this.base.x + Math.cos(top.a) * this.len * f, this.base.y - Math.sin(top.a) * this.len * f, 1, { size: 4 });
     }
-    if (this.delivered >= 100) {
-      if (this.spilled <= 30) {
-        this.finish(true, 'POT FILLED!', '100 g delivered with only ' + Math.round(this.spilled) + ' g spilled. The screw is a rotating ramp — every turn lifts the tea one step. Archimedes would be proud!', 'cheer');
+    if (Math.random() < dt * 2.5) SFX.whirr();
+    if (this.delivered >= this.target) {
+      if (this.spilled <= this.spillLimit) {
+        this.finish(true, 'POT FILLED!', this.target + ' g delivered with only ' + Math.round(this.spilled) + ' g spilled. The screw is a rotating ramp — every turn lifts the tea one step. Archimedes would be proud!', 'cheer');
       } else {
-        this.finish(false, 'WHAT A MESS!', 'The pot is full… but you flung ' + Math.round(this.spilled) + ' g around the workshop (limit: 30 g). Achoo! Slow the spin or tighten the pitch.', 'shock');
+        this.finish(false, 'WHAT A MESS!', 'The pot is full… but you flung ' + Math.round(this.spilled) + ' g around the workshop (limit: ' + this.spillLimit + ' g). Achoo! Slow the spin or tighten the pitch.', 'shock');
       }
       return;
     }
@@ -1635,7 +2190,7 @@ class Stage2Screw extends StageBase {
       if (!r.reaches) {
         this.finish(false, 'MISSED THE POT!', 'At ' + this.tilt.value + '° the screw top is BELOW the pot rim, so every gram missed. Tea cannot fall upwards — tilt it to 40° or more!', 'sad');
       } else {
-        this.finish(false, 'TOO SLOW…', 'Time up — only ' + Math.round(this.delivered) + ' g of 100 g made it. More spin speed or a wider pitch. (Careful: too steep makes tea slip back!)', 'sad');
+        this.finish(false, 'TOO SLOW…', 'Time up — only ' + Math.round(this.delivered) + ' g of ' + this.target + ' g made it. More spin speed or a wider pitch. (Careful: too steep makes tea slip back!)', 'sad');
       }
     }
   }
@@ -1833,16 +2388,34 @@ class Stage3Circuit extends StageBase {
     this.shorted = false;
     this.whistled = false;
     this.dotT = 0;
+    let band = Save.challenge().circuitBand;
+    if (engineerOn()) band = narrowBand(band, CIRCUIT_WATTS, 10);
+    this.band = band;
+    this.fuseW = band[1];
+    this.lossK = band[0] / 85;  // sized so power below the band plateaus under 100 °C
+    this.heatC = this.lossK * 5;
     this.battSel = this.ui.add(new Selector({ x: 140, y: 152, w: 210, h: 40, label: 'Battery voltage',
       options: [{label:'6 V',value:6},{label:'12 V',value:12},{label:'24 V',value:24}],
       index: saved.v === 6 ? 0 : saved.v === 24 ? 2 : 1 }));
     this.powerGauge = this.ui.add(new Gauge({ x: 245, y: 288, r: 46, min: 0, max: 120, unit: 'W', label: 'Heating power',
-      bands: [{from:0,to:40,color:PAL.greyLite},{from:40,to:70,color:PAL.green},{from:70,to:120,color:PAL.red}] }));
+      bands: [{from:0,to:band[0],color:PAL.greyLite},
+              {from:band[0],to:Math.min(band[1],120),color:PAL.green,safe:true},
+              {from:Math.min(band[1],120),to:120,color:PAL.red,danger:true}] }));
     this.thermo = this.ui.add(new Meter({ x: 316, y: 330, w: 26, h: 130, max: 110, band: [100, 110], color: PAL.red,
       label: '°C', format: v => Math.round(v) + '°' }));
   }
   sayIntro(){
-    Mentor.say('Electrical engineering time! Wire the battery to the heating coils: tap the dashed wires to connect them, tap a socket to add a coil. We need 40–70 watts — less won’t boil, more blows the fuse. And DON’T give the current a shortcut around the coils!', 'idle');
+    Mentor.say('Electrical engineering time! Wire the battery to the heating coils: tap the dashed wires to connect them, tap a socket to add a coil. We need ' + this.band[0] + '–' + this.band[1] + ' watts — less won’t boil, more blows the fuse. And DON’T give the current a shortcut around the coils!', 'idle');
+  }
+  precision(){
+    const s = this.solve();
+    const half = (this.band[1] - this.band[0]) / 2;
+    return 1 - Math.abs(s.P - (this.band[0] + this.band[1]) / 2) / half;
+  }
+  mathText(){
+    const s = this.solve();
+    if (s.open || !this.switchOn) return 'I = V ÷ R   ·   P = V × I';
+    return 'I = ' + s.V + '÷' + (s.Rext > 999 ? '∞' : fmt1(s.Rext)) + ' = ' + fmt1(Math.min(99, s.I)) + ' A  ·  P = ' + Math.round(Math.min(999, s.P)) + ' W';
   }
   setParams(o){
     if (o.v) this.battSel.index = { 6:0, 12:1, 24:2 }[o.v];
@@ -1911,19 +2484,21 @@ class Stage3Circuit extends StageBase {
         : 'Everything is wired… but the SWITCH is open! Tap the switch to close it, then run again.', 'think');
       return;
     }
+    if (this.sandbox) this.sim = this.solve(); // live rewiring while powered (safely — it's a game)
     if (!s.open && !s.short) {
-      if (s.P > 70 && this.runT > 1.6 && !this.fuseBlown) {
+      if (s.P > this.fuseW && this.runT > 1.6 && !this.fuseBlown) {
         this.fuseBlown = true;
         SFX.pop();
         Particles.spawn('spark', 440, 185, 16);
         Particles.spawn('puff', 440, 185, 6);
-        this.finish(false, 'FUSE BLOWN!', Math.round(s.P) + ' watts is too much for our 70 W fuse — POP! P = V²÷R, so try lower voltage or MORE resistance (coils in series add up).', 'shock');
+        this.finish(false, 'FUSE BLOWN!', Math.round(s.P) + ' watts is too much for our ' + this.fuseW + ' W fuse — POP! P = V²÷R, so try lower voltage or MORE resistance (coils in series add up).', 'shock');
         return;
       }
-      if (s.P <= 70) {
-        // heat the water: equilibrium temp = 20 + 2P
-        this.temp += (s.P - (this.temp - 20) * 0.5) / 2.5 * dt;
+      if (s.P <= this.fuseW) {
+        // heat the water: equilibrium temp = 20 + P/lossK (≈105 °C at the bottom of the band)
+        this.temp += (s.P - (this.temp - 20) * this.lossK) / this.heatC * dt;
         this.thermo.value = this.temp;
+        if (this.temp > 60 && Math.random() < dt * 3) SFX.rumble();
         if (this.temp > 45 && Math.random() < dt * (this.temp - 40) / 6) {
           Particles.spawn('bubble', 222 + rand(-28, 28), 438, 1);
           if (Math.random() < 0.3) SFX.bubble();
@@ -1979,7 +2554,7 @@ class Stage3Circuit extends StageBase {
     // left panel: power supply + gauge
     panel(ctx, 120, 95, 250, 250, 14, PAL.paper);
     label(ctx, 'POWER STATION', 245, 116, F(13, true), PAL.tealDark, 'center');
-    label(ctx, 'Fuse limit: 70 W', 245, 334, F(12), PAL.redDark, 'center');
+    label(ctx, 'Fuse limit: ' + this.fuseW + ' W', 245, 334, F(12), PAL.redDark, 'center');
     // kettle + thermometer
     label(ctx, 'WATER TANK', 222, 348, F(12, true), PAL.woodDark, 'center');
     drawKettle(ctx, 222, 458, 1.05, { color: PAL.steel });
@@ -2107,7 +2682,7 @@ class Stage3Circuit extends StageBase {
     if (s && !s.open && this.switchOn) {
       const shortTxt = s.short ? '⚠ R almost zero!' : '';
       label(ctx, 'I = ' + fmt1(Math.min(99, s.I)) + ' A    R = ' + (s.Rext > 999 ? '∞' : fmt1(s.Rext)) + ' Ω    P = ' + Math.round(Math.min(999, s.P)) + ' W   ' + shortTxt,
-        660, 462, F(15, true), s.short || s.P > 70 ? PAL.redDark : PAL.ink, 'center');
+        660, 462, F(15, true), s.short || s.P > this.fuseW ? PAL.redDark : PAL.ink, 'center');
     } else {
       label(ctx, 'I = 0 A — no current flowing', 660, 462, F(15, true), PAL.grey, 'center');
     }
@@ -2134,13 +2709,28 @@ class Stage4Brew extends StageBase {
     const saved = Save.data.params.brew || {};
     this.tempSlider = this.ui.add(new Slider({ x: 148, y: 306, w: 190, label: 'Water temperature', min: 60, max: 100, step: 5,
       value: saved.temp || 80, format: v => v + ' °C' }));
-    this.concMeter = this.ui.add(new Meter({ x: 866, y: 120, w: 38, h: 190, max: 1, band: [0.55, 0.85], color: PAL.amber,
+    this.bandC = engineerOn() ? [0.6, 0.8] : [0.55, 0.85];
+    this.bitterLimit = engineerOn() ? 0.2 : 0.3;
+    this.concMeter = this.ui.add(new Meter({ x: 866, y: 120, w: 38, h: 190, max: 1, band: this.bandC, color: PAL.amber,
       label: 'Strength', format: v => Math.round(v * 100) + '%' }));
-    this.bitterMeter = this.ui.add(new Meter({ x: 806, y: 120, w: 24, h: 190, max: 0.6, band: [0, 0.3], color: '#6b4a86',
+    this.bitterMeter = this.ui.add(new Meter({ x: 806, y: 120, w: 24, h: 190, max: 0.6, band: [0, this.bitterLimit], color: '#6b4a86',
       label: 'Bitter', format: v => Math.round(v * 100) }));
     this.pullBtn = new Button({ x: W - 230, y: H - 82, w: 210, h: 64, text: 'PULL THE LEAVES!', style: 'danger', fontSize: 18,
       onClick: () => this.pull() });
-    this.C = 0; this.B = 0; this.pulled = false;
+    this.swirlBtn = new Button({ x: W - 230, y: H - 148, w: 210, h: 50, text: '🌀 Swirl the pot', style: 'primary', fontSize: 16,
+      onClick: () => {
+        this.swirlT = 1.4;
+        SFX.bubble();
+        for (let i = 0; i < 6; i++) Particles.spawn('bubble', 570 + rand(-60, 60), 330 + rand(-20, 40), 1);
+      } });
+    this.C = 0; this.B = 0; this.pulled = false; this.swirlT = 0;
+  }
+  precision(){
+    const half = (this.bandC[1] - this.bandC[0]) / 2;
+    return 1 - Math.abs(this.C - (this.bandC[0] + this.bandC[1]) / 2) / half;
+  }
+  mathText(){
+    return 'C = 1 − e^(−k·t) = ' + Math.round(this.C * 100) + '%  ·  k rises with °C';
   }
   sayIntro(){
     Mentor.say('Chemistry time! Steeping is DIFFUSION — flavour spreading from leaves into water, faster when hot. The order card says ' + this.tea.name.toLowerCase() + ': ' + this.tea.idealT[0] + '–' + this.tea.idealT[1] + '°C for ' + this.tea.steep[0] + '–' + this.tea.steep[1] + ' minutes. Set the temperature, press RUN, then pull the leaves at the perfect moment!', 'idle');
@@ -2167,7 +2757,7 @@ class Stage4Brew extends StageBase {
     return { r, tBitter, bRate, scorched };
   }
   startRun(){
-    this.C = 0; this.B = 0; this.pulled = false;
+    this.C = 0; this.B = 0; this.pulled = false; this.swirlT = 0;
     this.concMeter.value = 0; this.concMeter.shown = 0;
     this.bitterMeter.value = 0; this.bitterMeter.shown = 0;
     SFX.thunk();
@@ -2176,11 +2766,16 @@ class Stage4Brew extends StageBase {
     if (this.pulled) return;
     const { r, tBitter, bRate } = this.brewRates();
     const m = this.minutes();
-    this.C = 1 - Math.exp(-r * m);
-    this.B = Math.max(0, (m - tBitter) * bRate);
+    // incremental diffusion so swirling (stirring) can speed it up mid-brew
+    const swirl = this.swirlT > 0 ? 1.35 : 1;
+    if (this.swirlT > 0) this.swirlT -= dt;
+    const dMin = dt * 0.5; // 1 game-minute = 2 real seconds
+    this.C += r * swirl * (1 - this.C) * dMin;
+    if (m > tBitter) this.B += bRate * swirl * dMin;
     this.concMeter.value = this.C;
     this.bitterMeter.value = this.B;
     this.pullBtn.update(dt);
+    this.swirlBtn.update(dt);
     // diffusion wisps
     if (Math.random() < dt * 10 * (1 - this.C)) {
       Particles.spawn('drop', 560 + rand(-24, 24), 320 + rand(-6, 24), 1, { color: this.tea.color, vy: rand(10, 40) });
@@ -2195,13 +2790,13 @@ class Stage4Brew extends StageBase {
     SFX.thunk();
     const { scorched } = this.brewRates();
     const m = this.minutes();
-    const inBand = this.C >= 0.55 && this.C <= 0.85;
-    const okBitter = this.B <= 0.3;
+    const inBand = this.C >= this.bandC[0] && this.C <= this.bandC[1];
+    const okBitter = this.B <= this.bitterLimit;
     if (inBand && okBitter) {
       this.finish(true, 'PERFECT BREW!', fmt1(m) + ' minutes at ' + this.tempSlider.value + '°C — strength ' + Math.round(this.C * 100) + '%, hardly any bitterness. Diffusion, precisely controlled. You have the makings of a tea chemist!', 'cheer');
     } else if (scorched && !okBitter) {
       this.finish(false, 'SCORCHED!', this.tempSlider.value + '°C is TOO HOT for ' + this.tea.name.toLowerCase() + ' — the heat ripped out the bitter compounds almost immediately. Cooler water, gentler diffusion!', 'shock');
-    } else if (!okBitter || this.C > 0.85) {
+    } else if (!okBitter || this.C > this.bandC[1]) {
       this.finish(false, 'TOO BITTER!', 'Oversteeped — ' + fmt1(m) + ' minutes let too many bitter molecules diffuse out. Pekoe’s moustache is curling. Pull earlier next time!', 'sad');
     } else {
       this.finish(false, 'DISHWATER…', 'Pulled at ' + fmt1(m) + ' min — only ' + Math.round(this.C * 100) + '% strength. ' + (this.tempSlider.value < this.tea.idealT[0] ? 'The water was too cool — diffusion crawled along. Hotter!' : 'Give diffusion more time to work!'), 'sad');
@@ -2211,7 +2806,12 @@ class Stage4Brew extends StageBase {
     if (this.phase === 'build') { this.concMeter.value = 0; this.bitterMeter.value = 0; }
   }
   onPointerDown(p){
-    if (this.phase === 'running') { this.pullBtn.down(p); return; }
+    if (this.phase === 'running') {
+      if (this.pullBtn.down(p)) return;
+      this.swirlBtn.down(p);
+      if (this.sandbox) super.onPointerDown(p);
+      return;
+    }
     super.onPointerDown(p);
   }
   renderWorld(ctx){
@@ -2220,9 +2820,15 @@ class Stage4Brew extends StageBase {
     panel(ctx, 118, 95, 252, 158, 14, '#fdf1d6');
     label(ctx, '📋 ORDER CARD', 244, 120, F(14, true), PAL.redDark, 'center');
     label(ctx, this.tea.name, 244, 148, F(21, true), PAL.ink, 'center');
-    label(ctx, 'Water: ' + this.tea.idealT[0] + '–' + this.tea.idealT[1] + ' °C', 244, 176, F(15), PAL.ink, 'center');
-    label(ctx, 'Steep: ' + this.tea.steep[0] + '–' + this.tea.steep[1] + ' min', 244, 198, F(15), PAL.ink, 'center');
-    label(ctx, this.tea.note, 244, 226, F(12), PAL.woodDark, 'center');
+    if (engineerOn() && !this.sandbox) {
+      label(ctx, 'Water: ?? °C', 244, 176, F(15), PAL.ink, 'center');
+      label(ctx, 'Steep: ?? min', 244, 198, F(15), PAL.ink, 'center');
+      label(ctx, 'Engineers know their teas!', 244, 226, F(12), PAL.redDark, 'center');
+    } else {
+      label(ctx, 'Water: ' + this.tea.idealT[0] + '–' + this.tea.idealT[1] + ' °C', 244, 176, F(15), PAL.ink, 'center');
+      label(ctx, 'Steep: ' + this.tea.steep[0] + '–' + this.tea.steep[1] + ' min', 244, 198, F(15), PAL.ink, 'center');
+      label(ctx, this.tea.note, 244, 226, F(12), PAL.woodDark, 'center');
+    }
     // temp control
     panel(ctx, 118, 262, 252, 82, 14, PAL.paper);
     // steep clock
@@ -2309,7 +2915,7 @@ class Stage4Brew extends StageBase {
     label(ctx, this.tempSlider.value + ' °C', px, py + pr + 44, F(16, true),
       this.brewRates().scorched ? PAL.redDark : PAL.ink, 'center');
     Particles.render(ctx);
-    if (this.phase === 'running' && !this.pulled) this.pullBtn.render(ctx);
+    if (this.phase === 'running' && !this.pulled) { this.pullBtn.render(ctx); this.swirlBtn.render(ctx); }
   }
 }
 STAGES.brew = new Stage4Brew(stageDef('brew'));
@@ -2585,37 +3191,31 @@ class Stage5Assembly extends StageBase {
     ctx.save();
     ctx.strokeStyle = PAL.brass; ctx.lineWidth = 3;
     rr(ctx, px + 10, py + 10, pw - 20, ph - 20, 12); ctx.stroke();
-    label(ctx, '★ CERTIFICATE ★', W / 2, py + 44, F(16, true), PAL.amber, 'center');
-    label(ctx, 'CERTIFIED TEA ENGINEER', W / 2, py + 82, F(28, true), PAL.tealDark, 'center');
-    label(ctx, 'Mechanical · Electrical · Chemical', W / 2, py + 110, F(14), PAL.woodDark, 'center');
-    // stars
+    label(ctx, '★ CERTIFICATE ★', W / 2, py + 40, F(16, true), PAL.amber, 'center');
+    label(ctx, 'CERTIFIED TEA ENGINEER', W / 2, py + 76, F(28, true), PAL.tealDark, 'center');
+    label(ctx, 'awarded to  ' + (Save.data.playerName || '(add your name!)'), W / 2, py + 106, F(17, true),
+      Save.data.playerName ? PAL.ink : PAL.grey, 'center');
+    label(ctx, 'Mechanical · Electrical · Chemical', W / 2, py + 128, F(13), PAL.woodDark, 'center');
     for (let i = 0; i < 3; i++) {
-      const sx = W / 2 + (i - 1) * 66, sy = py + 160;
-      const on = i < stars;
-      ctx.save();
-      ctx.translate(sx, sy);
-      const pulse = on ? 1 + Math.sin(this.t * 3 + i) * 0.06 : 1;
-      ctx.scale(pulse, pulse);
-      ctx.beginPath();
-      for (let k = 0; k < 5; k++) {
-        const a = -Math.PI / 2 + k * TAU / 5;
-        ctx.lineTo(Math.cos(a) * 24, Math.sin(a) * 24);
-        ctx.lineTo(Math.cos(a + TAU / 10) * 10, Math.sin(a + TAU / 10) * 10);
-      }
-      ctx.closePath();
-      ctx.fillStyle = on ? PAL.brass : PAL.greyLite; ctx.fill();
-      ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
-      ctx.restore();
+      drawStar(ctx, W / 2 + (i - 1) * 66, py + 168, 24, i < stars,
+        i < stars ? 1 + Math.sin(this.t * 3 + i) * 0.06 * MOTION : 1);
     }
-    drawWrapped(ctx, this.result.line, W / 2, py + 200, pw - 80, 20, F(14), PAL.ink, 'center');
-    label(ctx, 'Total retries across all stages: ' + Save.totalRetries(), W / 2, py + ph - 18, F(12), PAL.grey, 'center');
+    drawWrapped(ctx, this.result.line, W / 2, py + 204, pw - 80, 20, F(14), PAL.ink, 'center');
+    label(ctx, 'Total retries across all stages: ' + Save.totalRetries(), W / 2, py + ph - 16, F(12), PAL.grey, 'center');
     ctx.restore();
+    // name + print (small corner buttons on the certificate)
+    this._nameBtn = this._nameBtn || new Button({ w: 116, h: 38, text: '✎ Name', style: 'plain', fontSize: 14, onClick: () => this.promptName() });
+    this._printBtn = this._printBtn || new Button({ w: 116, h: 38, text: '🖨 Print', style: 'plain', fontSize: 14, onClick: () => this.printCert(stars) });
+    this._nameBtn.x = px + 18; this._nameBtn.y = py + ph - 50;
+    this._printBtn.x = px + pw - 134; this._printBtn.y = py + ph - 50;
+    this._nameBtn.render(ctx); this._printBtn.render(ctx);
     this.tweakBtn.text = '☕ Brew another cup';
     this.tweakBtn.w = 220; this.tweakBtn.x = W / 2 - 240;
     this.tweakBtn.onClick = () => {
       Save.data.tea = null;
       Save.data.brews = (Save.data.brews || 0) + 1;
       Save.data.retries = {};
+      Save.data.challenge = newChallenge(); // fresh targets: every brew is a new engineering job
       Save.save();
       Game.goto(MapScreen);
     };
@@ -2624,14 +3224,62 @@ class Stage5Assembly extends StageBase {
     this.tweakBtn.render(ctx);
     this.nextBtn.render(ctx);
   }
+  promptName(){
+    if (this._input) return;
+    const inp = document.createElement('input');
+    inp.maxLength = 24;
+    inp.value = Save.data.playerName || '';
+    inp.placeholder = 'Your name, engineer!';
+    Object.assign(inp.style, {
+      position: 'fixed', left: '50%', top: '38%', transform: 'translate(-50%,-50%)',
+      font: 'bold 22px ' + FONT, padding: '10px 18px', border: '3px solid #3a2c23',
+      borderRadius: '14px', background: '#fff8e8', textAlign: 'center', zIndex: 10, outline: 'none'
+    });
+    document.body.appendChild(inp);
+    inp.focus();
+    const commit = () => {
+      if (!this._input) return;
+      Save.data.playerName = inp.value.trim().slice(0, 24);
+      Save.save();
+      inp.remove();
+      this._input = null;
+    };
+    inp.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') commit(); });
+    inp.addEventListener('blur', commit);
+    this._input = inp;
+  }
+  printCert(stars){
+    let div = document.getElementById('printCert');
+    if (!div) { div = document.createElement('div'); div.id = 'printCert'; document.body.appendChild(div); }
+    div.innerHTML = '';
+    const add = (tag, text, style) => {
+      const el = document.createElement(tag);
+      el.textContent = text;
+      if (style) el.style.cssText = style;
+      div.appendChild(el);
+    };
+    add('div', '★ ★ ★', 'font-size:28px;color:#b8860b;');
+    add('h1', 'Certified Tea Engineer', 'font-size:40px;margin:12px 0;color:#2c7f79;');
+    add('div', 'awarded to', 'font-size:16px;color:#666;');
+    add('div', Save.data.playerName || 'A Brilliant Engineer', 'font-size:30px;font-weight:bold;margin:8px 0 18px;');
+    add('div', 'for mastering Mechanical, Electrical & Chemical engineering', 'font-size:16px;');
+    add('div', 'Gear Ratios · The Archimedes Screw · Ohm’s Law · Diffusion · Systems Engineering', 'font-size:14px;margin:12px 0;color:#444;');
+    add('div', 'Rating: ' + '★'.repeat(stars) + '☆'.repeat(3 - stars), 'font-size:24px;color:#b8860b;margin:8px 0;');
+    add('div', new Date().toLocaleDateString(), 'font-size:14px;color:#666;margin-top:18px;');
+    add('div', 'The Great Tea Machine', 'font-size:13px;color:#999;margin-top:6px;font-style:italic;');
+    try { window.print(); } catch (e) {}
+  }
   onPointerDown(p){
     if (this.phase === 'result' && this.result.win) {
       if (this.nextBtn.down(p)) return;
+      if (this._nameBtn && this._nameBtn.down(p)) return;
+      if (this._printBtn && this._printBtn.down(p)) return;
       if (this.tweakBtn.down(p)) return;
       return;
     }
     super.onPointerDown(p);
   }
+  exit(){ if (this._input) { this._input.remove(); this._input = null; } }
 }
 STAGES.assembly = new Stage5Assembly(stageDef('assembly'));
 // fallback stubs for any stage not yet implemented
@@ -2649,22 +3297,37 @@ for (const d of STAGE_DEFS) {
 // ===================== 15. DEBUG / TEST HOOK =====================
 window.TTM = {
   Game, Save, STAGES, STAGE_ORDER, Particles,
-  goto(id){
+  goto(id, params){
     if (id === 'title') Game.goto(TitleScreen);
     else if (id === 'map') Game.goto(MapScreen);
-    else Game.goto(STAGES[id]);
+    else if (id === 'notebook') Game.goto(NotebookScreen);
+    else if (id === 'tinker') Game.goto(TinkerScreen);
+    else Game.goto(STAGES[id], params);
   },
   screenId(){
     const s = Game.screen;
     if (s === TitleScreen) return 'title';
     if (s === MapScreen) return 'map';
     if (s === ConceptScreen) return 'concept';
+    if (s === QuizScreen) return 'quiz';
+    if (s === NotebookScreen) return 'notebook';
+    if (s === TinkerScreen) return 'tinker';
     for (const id in STAGES) if (STAGES[id] === s) return id;
     return 'unknown';
   },
+  answerQuiz(correct){
+    if (Game.screen === QuizScreen) QuizScreen.answer(correct ? QuizScreen.correctIdx : (QuizScreen.correctIdx + 1) % 3);
+  },
+  setName(n){ Save.data.playerName = String(n).slice(0, 24); Save.save(); },
+  setChallenge(o){ Save.data.challenge = Object.assign(Save.challenge(), o); Save.save(); },
+  setEngineer(on){ Save.data.engineerMode = !!on; Save.save(); },
   state(){
     const s = Game.screen;
-    return { screen: this.screenId(), phase: s && s.phase, result: s && s.result, unlocked: Save.data.unlocked };
+    return {
+      screen: this.screenId(), phase: s && s.phase, result: s && s.result, unlocked: Save.data.unlocked,
+      stars: Save.data.stageStars, quiz: Save.data.quiz, challenge: Save.data.challenge,
+      engineer: Save.data.engineerMode, name: Save.data.playerName, sandbox: s && s.sandbox
+    };
   },
   pressRun(){ if (Game.screen && Game.screen.pressRun) Game.screen.pressRun(); },
   act(name){ if (Game.screen && Game.screen.act) Game.screen.act(name); },
@@ -2674,6 +3337,15 @@ window.TTM = {
 
 // ===================== 16. BOOT =====================
 Save.load();
+// PWA bits only when served over http(s) — double-clicking the file stays plain and quiet
+if (location.protocol === 'http:' || location.protocol === 'https:') {
+  const link = document.createElement('link');
+  link.rel = 'manifest'; link.href = 'manifest.webmanifest';
+  document.head.appendChild(link);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+}
 Game.goto(TitleScreen);
 requestAnimationFrame(frame);
 </script>
