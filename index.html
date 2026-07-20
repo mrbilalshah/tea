@@ -1237,7 +1237,312 @@ const ConceptScreen = {
 
 // ===================== 14. STAGES =====================
 const STAGES = {};
-// __STAGE1__
+// ---------- Stage 1: Gear Grinder ----------
+// crank 24T fixed @20 RPM -> chain -> gear A (back slot) ; A+B share an axle ;
+// gear B -> chain -> grinder gear 12T. rpm = 20 * (24/tA) * (tB/12) = 40*tB/tA
+const GEAR_COLORS = { 8: PAL.copper, 16: PAL.brass, 24: PAL.teal, 32: '#c977d6' };
+function gearR(teeth){ return teeth * 2.2; }
+function drawChain(ctx, x1, y1, r1, x2, y2, r2, dashOff){
+  const dx = x2 - x1, dy = y2 - y1;
+  const d = Math.hypot(dx, dy);
+  const dir = Math.atan2(dy, dx);
+  const phi = Math.acos(clamp((r1 - r2) / d, -1, 1));
+  ctx.save();
+  ctx.strokeStyle = PAL.ink; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.setLineDash([7, 6]); ctx.lineDashOffset = dashOff || 0;
+  for (const s of [1, -1]) {
+    const a = dir + s * phi;
+    ctx.beginPath();
+    ctx.moveTo(x1 + Math.cos(a) * (r1 + 4), y1 + Math.sin(a) * (r1 + 4));
+    ctx.lineTo(x2 + Math.cos(a) * (r2 + 4), y2 + Math.sin(a) * (r2 + 4));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+class Stage1Gears extends StageBase {
+  setup(){
+    this.crank = { x: 150, y: 320, teeth: 24, r: gearR(24) };
+    this.grind = { x: 645, y: 320, teeth: 12, r: gearR(12) };
+    this.slotA = { x: 355, y: 320 };
+    this.slotB = { x: 505, y: 320 };
+    this.gears = [8, 16, 24, 32].map((t, i) => ({
+      teeth: t, loc: 'tray', home: { x: 190 + i * 100, y: 155 }, x: 0, y: 0
+    }));
+    const saved = Save.data.params.gears;
+    if (saved) {
+      for (const g of this.gears) {
+        if (g.teeth === saved.a) g.loc = 'a';
+        else if (g.teeth === saved.b) g.loc = 'b';
+      }
+    }
+    this.drag = null;
+    this.angles = { crank: 0, axle: 0, grind: 0 };
+    this.speeds = { crank: 0, axle: 0, grind: 0 };
+    this.dashOff = 0;
+    this.jammed = false;
+    this.leafShake = 0;
+    this.rpmGauge = this.ui.add(new Gauge({ x: 775, y: 165, r: 48, min: 0, max: 120, unit: 'RPM', label: 'Grinder speed',
+      bands: [{ from: 0, to: 60, color: PAL.greyLite }, { from: 60, to: 80, color: PAL.green }, { from: 80, to: 120, color: PAL.red }] }));
+    this.tqGauge = this.ui.add(new Gauge({ x: 895, y: 165, r: 48, min: 0, max: 100, unit: '%', label: 'Grinding force',
+      bands: [{ from: 0, to: 20, color: PAL.red }, { from: 20, to: 100, color: PAL.green }] }));
+  }
+  sayIntro(){
+    Mentor.say('The crank turns at only 20 RPM but the grinder needs 60–80 RPM! Drag two gears onto the middle axle — they spin TOGETHER. Small back gear = the axle spins faster. Big front gear = the grinder spins faster still!', 'idle');
+  }
+  gearIn(loc){ return this.gears.find(g => g.loc === loc) || null; }
+  calc(){
+    const A = this.gearIn('a'), B = this.gearIn('b');
+    if (!A || !B) return { ok: false, rpm: 0, torque: 0 };
+    const rpm = 20 * (this.crank.teeth / A.teeth) * (B.teeth / this.grind.teeth);
+    const torque = (A.teeth / this.crank.teeth) * (this.grind.teeth / B.teeth);
+    return { ok: true, rpm, torque };
+  }
+  setParams(o){
+    for (const g of this.gears) g.loc = 'tray';
+    if (o.a) { const g = this.gears.find(x => x.teeth === o.a); if (g) g.loc = 'a'; }
+    if (o.b) { const g = this.gears.find(x => x.teeth === o.b); if (g) g.loc = 'b'; }
+  }
+  winParams(){ const A = this.gearIn('a'), B = this.gearIn('b'); return { a: A.teeth, b: B.teeth, rpm: Math.round(this.calc().rpm) }; }
+  startRun(){
+    this.jammed = false;
+    const c = this.calc();
+    this.target = c;
+    SFX.thunk();
+  }
+  updateRun(dt){
+    const c = this.target;
+    const spin = Math.min(1, this.runT / 0.8); // ramp up
+    const rpmToRad = r => r / 60 * TAU * 1.6;
+    this.speeds.crank = rpmToRad(20) * spin;
+    if (c.ok && !this.jammed) {
+      const axleRpm = 20 * (this.crank.teeth / this.gearIn('a').teeth);
+      this.speeds.axle = rpmToRad(axleRpm) * spin;
+      this.speeds.grind = rpmToRad(c.rpm) * spin;
+    } else {
+      this.speeds.axle = this.speeds.grind = 0;
+    }
+    this.rpmGauge.value = c.ok ? c.rpm * spin : 0;
+    this.tqGauge.value = c.ok ? c.torque * 100 * spin : 0;
+    // events
+    if (!this.jammed && c.ok && c.rpm > 80 && this.runT > 1.4) {
+      this.jammed = true;
+      SFX.boing();
+      Particles.spawn('puff', 790, 290, 14);
+      this.leafShake = 1;
+    }
+    if (c.ok && c.rpm >= 60 && c.rpm <= 80 && c.torque >= 0.2 && this.runT > 1.2) {
+      // grinding! crumbs fall into the jar
+      if (Math.random() < dt * 30) Particles.spawn('crumb', 795 + rand(-10, 10), 415, 2);
+      if (Math.random() < dt * 8) SFX.bubble();
+      this.leafShake = 0.35;
+    }
+    if (this.runT > 3.6) {
+      if (!c.ok) {
+        this.finish(false, 'NOTHING MOVES!', 'The chain has nothing to grab — put a gear in BOTH slots of the middle axle.', 'think');
+      } else if (this.jammed) {
+        this.finish(false, 'JAMMED!', Math.round(c.rpm) + ' RPM is too fast and too feeble — the grinder choked. Gear it down a notch.', 'shock');
+      } else if (c.rpm < 60) {
+        this.finish(false, 'TOO SLOW…', 'Only ' + Math.round(c.rpm) + ' RPM — the leaves just laugh at us. Smaller BACK gear or bigger FRONT gear!', 'sad');
+      } else if (c.torque < 0.2) {
+        this.finish(false, 'TOO WEAK!', 'Fast, but no muscle — the grinder stalls on the first leaf. Try a different combo.', 'sad');
+      } else {
+        this.finish(true, 'PERFECT GRIND!', Math.round(c.rpm) + ' RPM with plenty of force. Gear ratio ' + this.ratioText() + ' — a big gear driving a small one trades force for speed!', 'cheer');
+      }
+    }
+  }
+  ratioText(){
+    const A = this.gearIn('a'), B = this.gearIn('b');
+    const r = (this.crank.teeth / A.teeth) * (B.teeth / this.grind.teeth);
+    return '1:' + fmt1(r);
+  }
+  updateAlways(dt){
+    this.dashOff -= this.speeds.crank * 14 * dt;
+    this.angles.crank += this.speeds.crank * dt;
+    this.angles.axle += this.speeds.axle * dt;
+    this.angles.grind += this.speeds.grind * dt;
+    if (this.leafShake > 0) this.leafShake -= dt;
+    if (this.phase === 'result' && this.result.win) {
+      this.speeds.crank = 1.2; // idle victory spin
+      const c = this.calc();
+      this.speeds.axle = 1.2 * this.crank.teeth / this.gearIn('a').teeth;
+      this.speeds.grind = this.speeds.axle * this.gearIn('b').teeth / this.grind.teeth;
+      if (Math.random() < dt * 14) Particles.spawn('crumb', 795 + rand(-10, 10), 415, 1);
+    }
+    if (this.phase === 'build') {
+      this.speeds.crank *= Math.max(0, 1 - dt * 3);
+      this.speeds.axle *= Math.max(0, 1 - dt * 3);
+      this.speeds.grind *= Math.max(0, 1 - dt * 3);
+      const c = this.calc();
+      this.rpmGauge.value = 0; this.tqGauge.value = 0;
+      if (c.ok) { this.rpmGauge.value = 0; }
+    }
+  }
+  onBackToBuild(){ this.jammed = false; }
+  gearPos(g){
+    if (g.loc === 'tray') return g.home;
+    if (g.loc === 'a') return this.slotA;
+    if (g.loc === 'b') return this.slotB;
+    return g; // dragging: x,y live on gear
+  }
+  worldDown(p){
+    // grab topmost gear under pointer (placed or tray)
+    for (const g of this.gears) {
+      if (g.loc === 'drag') continue;
+      const pos = this.gearPos(g);
+      const r = Math.max(28, gearR(g.teeth) * (g.loc === 'tray' ? 0.55 : 1));
+      if ((p.x - pos.x) ** 2 + (p.y - pos.y) ** 2 < r * r) {
+        g.prevLoc = g.loc;
+        g.loc = 'drag'; g.x = p.x; g.y = p.y;
+        this.drag = g;
+        SFX.click();
+        return;
+      }
+    }
+  }
+  worldMove(p){ if (this.drag) { this.drag.x = p.x; this.drag.y = p.y; } }
+  worldUp(p){
+    if (!this.drag) return;
+    const g = this.drag; this.drag = null;
+    const near = (s, rad) => (p.x - s.x) ** 2 + (p.y - s.y) ** 2 < rad * rad;
+    let target = null;
+    if (near(this.slotA, 80)) target = 'a';
+    else if (near(this.slotB, 80)) target = 'b';
+    if (target) {
+      const occupied = this.gearIn(target);
+      if (occupied) occupied.loc = 'tray';
+      g.loc = target;
+      SFX.thunk();
+    } else {
+      g.loc = 'tray';
+    }
+  }
+  renderWorld(ctx){
+    const t = this.t;
+    // tray
+    drawWoodPanel(ctx, 120, 100, 420, 110);
+    label(ctx, 'GEAR TRAY', 150, 122, F(13, true), '#fff');
+    for (const g of this.gears) {
+      if (g.loc === 'tray') {
+        ctx.save(); ctx.globalAlpha = 0.35; ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(g.home.x, g.home.y, gearR(g.teeth) * 0.55 + 4, 0, TAU); ctx.stroke();
+        ctx.restore();
+      }
+    }
+    // work bench
+    ctx.fillStyle = PAL.woodDark;
+    rr(ctx, 90, 396, 620, 22, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // legs
+    ctx.fillStyle = PAL.woodDark;
+    ctx.fillRect(120, 416, 14, 94); ctx.strokeRect(120, 416, 14, 94);
+    ctx.fillRect(660, 416, 14, 94); ctx.strokeRect(660, 416, 14, 94);
+
+    // grinder machine
+    const shake = this.leafShake > 0 ? Math.sin(this.t * 60) * 2.4 * this.leafShake : 0;
+    ctx.save();
+    ctx.translate(shake, 0);
+    // hopper with leaves
+    ctx.fillStyle = PAL.steel;
+    ctx.beginPath();
+    ctx.moveTo(735, 216); ctx.lineTo(860, 216); ctx.lineTo(835, 262); ctx.lineTo(760, 262); ctx.closePath();
+    ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // leaves poking out
+    for (let i = 0; i < 6; i++) {
+      const lx = 752 + i * 16, ly = 210 + Math.sin(t * 2 + i) * 2;
+      ctx.fillStyle = i % 2 ? '#4d7a35' : '#5d8f40';
+      ctx.beginPath(); ctx.ellipse(lx, ly, 7, 11, i - 2, 0, TAU); ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    }
+    // body
+    ctx.fillStyle = PAL.copper;
+    rr(ctx, 700, 262, 195, 105, 14); ctx.fill();
+    ctx.lineWidth = 3.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    rr(ctx, 710, 270, 175, 16, 8); ctx.fill();
+    label(ctx, 'GRIND-O-MATIC', 797, 320, F(15, true), '#fff', 'center');
+    // rollers window
+    ctx.fillStyle = PAL.cream; rr(ctx, 742, 330, 110, 28, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.save(); ctx.beginPath(); rr(ctx, 742, 330, 110, 28, 8); ctx.clip();
+    for (let i = 0; i < 2; i++) {
+      const rx = 772 + i * 50;
+      drawGear(ctx, rx, 344, 8, 15, this.angles.grind * (i ? -1 : 1), PAL.steelDark);
+    }
+    ctx.restore();
+    // chute + jar
+    ctx.fillStyle = PAL.steel;
+    ctx.beginPath(); ctx.moveTo(775, 367); ctx.lineTo(815, 367); ctx.lineTo(805, 392); ctx.lineTo(785, 392); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+    // jar (doesn't shake)
+    ctx.fillStyle = 'rgba(215,235,230,0.65)';
+    rr(ctx, 762, 420, 66, 76, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    const jarFill = (this.phase === 'result' && this.result.win) ? 0.55 : (this.phase === 'running' && this.target && this.target.ok && this.target.rpm >= 60 && this.target.rpm <= 80 ? clamp((this.runT - 1.2) / 2.4, 0, 1) * 0.5 : 0);
+    if (jarFill > 0.02) {
+      ctx.fillStyle = '#5d4020';
+      rr(ctx, 766, 420 + 72 * (1 - jarFill), 58, 72 * jarFill, 5); ctx.fill();
+    }
+    label(ctx, 'ground tea', 795, 512, F(12), PAL.woodDark, 'center');
+
+    // crank + fixed gear
+    drawGear(ctx, this.crank.x, this.crank.y, this.crank.teeth, this.crank.r, this.angles.crank, PAL.steel);
+    // crank handle
+    ctx.save();
+    ctx.translate(this.crank.x, this.crank.y); ctx.rotate(this.angles.crank);
+    ctx.strokeStyle = PAL.ink; ctx.lineWidth = 8; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(this.crank.r * 0.8, 0); ctx.stroke();
+    ctx.fillStyle = PAL.red;
+    ctx.beginPath(); ctx.arc(this.crank.r * 0.8, 0, 9, 0, TAU); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.restore();
+    label(ctx, 'CRANK · 24 teeth · 20 RPM', this.crank.x, 410 + 24, F(13, true), PAL.ink, 'center');
+
+    // axle shaft connecting A and B
+    ctx.fillStyle = PAL.steelDark;
+    rr(ctx, this.slotA.x, this.slotA.y - 8, this.slotB.x - this.slotA.x, 16, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    label(ctx, 'SHARED AXLE — they spin together!', (this.slotA.x + this.slotB.x) / 2, 240, F(13, true), PAL.tealDark, 'center');
+    // slots (dashed when empty)
+    const A = this.gearIn('a'), B = this.gearIn('b');
+    for (const [slot, g, name] of [[this.slotA, A, 'BACK'], [this.slotB, B, 'FRONT']]) {
+      if (!g) {
+        ctx.save();
+        ctx.setLineDash([7, 7]); ctx.strokeStyle = PAL.tealDark; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(slot.x, slot.y, 42, 0, TAU); ctx.stroke();
+        ctx.restore();
+        label(ctx, '+', slot.x, slot.y + 8, F(30, true), PAL.tealDark, 'center');
+      }
+      label(ctx, name, slot.x, 410 + 24, F(13, true), PAL.woodDark, 'center');
+    }
+    // chains
+    if (A) drawChain(ctx, this.crank.x, this.crank.y, this.crank.r, this.slotA.x, this.slotA.y, gearR(A.teeth), this.dashOff);
+    if (B) drawChain(ctx, this.slotB.x, this.slotB.y, gearR(B.teeth), this.grind.x, this.grind.y, this.grind.r, this.dashOff * (B ? B.teeth / 12 : 1));
+    // grinder gear
+    drawGear(ctx, this.grind.x, this.grind.y, this.grind.teeth, this.grind.r, this.angles.grind, PAL.steel);
+    label(ctx, '12 t', this.grind.x, this.grind.y - this.grind.r - 10, F(12, true), PAL.ink, 'center');
+    // placed + tray gears
+    for (const g of this.gears) {
+      if (g.loc === 'drag') continue;
+      const pos = this.gearPos(g);
+      const inTray = g.loc === 'tray';
+      const ang = inTray ? t * 0.15 : this.angles.axle;
+      drawGear(ctx, pos.x, pos.y, g.teeth, gearR(g.teeth) * (inTray ? 0.55 : 1), ang, GEAR_COLORS[g.teeth]);
+      label(ctx, g.teeth, pos.x, pos.y + 5, F(15, true), '#fff', 'center');
+    }
+    Particles.render(ctx);
+    // dragged gear on top
+    if (this.drag) {
+      const g = this.drag;
+      ctx.save(); ctx.globalAlpha = 0.85;
+      drawGear(ctx, g.x, g.y, g.teeth, gearR(g.teeth), 0, GEAR_COLORS[g.teeth]);
+      label(ctx, g.teeth, g.x, g.y + 5, F(15, true), '#fff', 'center');
+      ctx.restore();
+    }
+  }
+}
+STAGES.gears = new Stage1Gears(stageDef('gears'));
 // __STAGE2__
 // __STAGE3__
 // __STAGE4__
