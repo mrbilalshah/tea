@@ -34,7 +34,7 @@ async function waitResult(timeoutMs = 12000) {
   await page.waitForFunction(() => window.TTM.state().phase === 'result', null, { timeout: timeoutMs });
   return state();
 }
-async function runStage(id, name, params, expectWin, shotPrefix, midShotAt) {
+async function runStage(id, name, params, expectWin, shotPrefix, midShotAt, timeoutMs) {
   await page.evaluate(id => window.TTM.goto(id), id);
   await page.waitForTimeout(300);
   if (params) await page.evaluate(p => window.TTM.setParams(p), params);
@@ -42,7 +42,7 @@ async function runStage(id, name, params, expectWin, shotPrefix, midShotAt) {
   if (shotPrefix) await shot(shotPrefix + '-build');
   await page.evaluate(() => window.TTM.pressRun());
   if (midShotAt) { await page.waitForTimeout(midShotAt); if (shotPrefix) await shot(shotPrefix + '-running'); }
-  const s = await waitResult();
+  const s = await waitResult(timeoutMs || 20000);
   if (shotPrefix) await shot(shotPrefix + '-result');
   check(name, s.result && s.result.win === expectWin, JSON.stringify(s.result && s.result.title));
   return s;
@@ -97,6 +97,14 @@ const placed = await page.evaluate(() => {
   return { a: a && a.teeth, b: b && b.teeth };
 });
 check('mouse drag placed gears', placed.a === 16 && placed.b === 24, JSON.stringify(placed));
+
+// ---------- Stage 2: screw ----------
+console.log('Stage 2 — Screw Lift');
+await runStage('screw', 'win 45°/medium/×2', { tilt: 45, pitch: 1, speed: 2 }, true, 'stage2', 3000);
+await runStage('screw', 'fail: too shallow misses pot', { tilt: 30, pitch: 1, speed: 2 }, false, 'stage2-miss', 3000);
+await runStage('screw', 'fail: fast+wide is messy', { tilt: 45, pitch: 2, speed: 3 }, false);
+await runStage('screw', 'fail: too slow', { tilt: 45, pitch: 0, speed: 0.5 }, false, null, null, 20000);
+check('unlocked stage 3', (await state()).unlocked >= 3);
 
 // ---------- persistence ----------
 console.log('Persistence');

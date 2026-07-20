@@ -1543,7 +1543,227 @@ class Stage1Gears extends StageBase {
   }
 }
 STAGES.gears = new Stage1Gears(stageDef('gears'));
-// __STAGE2__
+// ---------- Stage 2: Screw Lift ----------
+// delivered/s = base(pitch) * speed * eff(angle), minus a spill fraction.
+// Must lift 100 g into the pot in 15 s, spilling no more than 30 g.
+const SCREW_PITCHES = [
+  { label: 'Tight', base: 4, spill: 0.04, spacing: 18 },
+  { label: 'Medium', base: 9, spill: 0.08, spacing: 27 },
+  { label: 'Wide', base: 14, spill: 0.14, spacing: 38 },
+];
+class Stage2Screw extends StageBase {
+  setup(){
+    this.base = { x: 265, y: 455 };
+    this.len = 330;
+    this.tubeW = 46;
+    this.delivered = 0; this.spilled = 0;
+    this.spin = 0;
+    const saved = Save.data.params.screw || {};
+    this.tilt = this.ui.add(new Slider({ x: 150, y: 146, w: 190, label: 'Tilt angle', min: 15, max: 75, step: 5,
+      value: saved.tilt || 30, format: v => v + '°' }));
+    this.speed = this.ui.add(new Slider({ x: 150, y: 200, w: 190, label: 'Spin speed', min: 0.5, max: 3, step: 0.25,
+      value: saved.speed || 1, format: v => '×' + v }));
+    this.pitch = this.ui.add(new Selector({ x: 150, y: 242, w: 190, h: 38, label: 'Thread pitch',
+      options: SCREW_PITCHES.map((p, i) => ({ label: p.label, value: i })), index: saved.pitch != null ? saved.pitch : 1 }));
+    this.potMeter = this.ui.add(new Meter({ x: 872, y: 130, w: 36, h: 170, max: 120, band: [100, 120], color: '#5d4020',
+      label: 'In the pot', format: v => Math.round(v) + ' g' }));
+    this.spillMeter = this.ui.add(new Meter({ x: 810, y: 130, w: 22, h: 170, max: 60, band: [0, 30], color: PAL.red,
+      label: 'Spilled', format: v => Math.round(v) + ' g' }));
+  }
+  sayIntro(){
+    Mentor.say('Archimedes to the rescue! This screw is a ramp wrapped around a pole — each turn carries tea one step up. Lift 100 g into the pot in 15 seconds. Steeper is shorter… but tea slips back. And spinning fast gets MESSY!', 'idle');
+  }
+  setParams(o){
+    if (o.tilt != null) this.tilt.value = o.tilt;
+    if (o.speed != null) this.speed.value = o.speed;
+    if (o.pitch != null) this.pitch.index = o.pitch;
+  }
+  winParams(){ return { tilt: this.tilt.value, speed: this.speed.value, pitch: this.pitch.index }; }
+  rates(){
+    const a = this.tilt.value;
+    const P = SCREW_PITCHES[this.pitch.index];
+    const sp = this.speed.value;
+    const eff = a <= 60 ? 1 : Math.max(0.15, 1 - (a - 60) / 15 * 0.85);
+    const gross = P.base * sp * eff;
+    const reaches = a >= 40;
+    let spillFrac = clamp(sp * P.spill + Math.max(0, a - 55) * 0.02, 0, 0.95);
+    if (!reaches) spillFrac = 1;
+    return { gross, spillFrac, del: gross * (1 - spillFrac), spl: gross * spillFrac, reaches };
+  }
+  screwTop(){
+    const a = this.tilt.value * Math.PI / 180;
+    return { x: this.base.x + Math.cos(a) * this.len, y: this.base.y - Math.sin(a) * this.len, a };
+  }
+  startRun(){
+    this.delivered = 0; this.spilled = 0;
+    this.potMeter.value = 0; this.potMeter.shown = 0;
+    this.spillMeter.value = 0; this.spillMeter.shown = 0;
+    SFX.thunk();
+  }
+  updateRun(dt){
+    const r = this.rates();
+    this.spin += this.speed.value * dt * 7;
+    this.delivered += r.del * dt;
+    this.spilled += r.spl * dt;
+    this.potMeter.value = this.delivered;
+    this.spillMeter.value = this.spilled;
+    const top = this.screwTop();
+    // particles: delivery drops into pot, spills fly off the top
+    if (r.del > 0 && Math.random() < dt * r.del * 2.2) {
+      Particles.spawn('crumb', top.x + rand(-6, 6), top.y + 12, 1, { color: '#5d4020', vy: 40 });
+    }
+    if (r.spl > 0.4 && Math.random() < dt * r.spl * 2.2) {
+      Particles.spawn('leaf', top.x + rand(-10, 10), top.y, 1, { color: '#5d4020', vx: rand(60, 160) * (Math.random() < 0.4 ? -1 : 1), vy: -60 });
+    }
+    // slip-back haze inside tube when too steep
+    if (this.tilt.value > 60 && Math.random() < dt * 8) {
+      const f = rand(0.3, 0.8);
+      Particles.spawn('puff', this.base.x + Math.cos(top.a) * this.len * f, this.base.y - Math.sin(top.a) * this.len * f, 1, { size: 4 });
+    }
+    if (this.delivered >= 100) {
+      if (this.spilled <= 30) {
+        this.finish(true, 'POT FILLED!', '100 g delivered with only ' + Math.round(this.spilled) + ' g spilled. The screw is a rotating ramp — every turn lifts the tea one step. Archimedes would be proud!', 'cheer');
+      } else {
+        this.finish(false, 'WHAT A MESS!', 'The pot is full… but you flung ' + Math.round(this.spilled) + ' g around the workshop (limit: 30 g). Achoo! Slow the spin or tighten the pitch.', 'shock');
+      }
+      return;
+    }
+    if (this.runT >= 15) {
+      if (!r.reaches) {
+        this.finish(false, 'MISSED THE POT!', 'At ' + this.tilt.value + '° the screw top is BELOW the pot rim, so every gram missed. Tea cannot fall upwards — tilt it to 40° or more!', 'sad');
+      } else {
+        this.finish(false, 'TOO SLOW…', 'Time up — only ' + Math.round(this.delivered) + ' g of 100 g made it. More spin speed or a wider pitch. (Careful: too steep makes tea slip back!)', 'sad');
+      }
+    }
+  }
+  updateAlways(dt){
+    if (this.phase === 'build') this.spin += this.speed.value * dt * 1.2;
+    if (this.phase === 'result' && this.result.win) this.spin += dt * 4;
+  }
+  renderWorld(ctx){
+    const top = this.screwTop();
+    const a = top.a;
+    const P = SCREW_PITCHES[this.pitch.index];
+    // control panel
+    panel(ctx, 120, 88, 250, 210, 14, PAL.paper);
+    label(ctx, 'SCREW CONTROLS', 245, 112, F(13, true), PAL.tealDark, 'center');
+    // timer
+    if (this.phase === 'running') {
+      label(ctx, '⏱ ' + Math.max(0, 15 - this.runT).toFixed(1) + ' s', 245, 320, F(22, true), this.runT > 11 ? PAL.red : PAL.ink, 'center');
+    }
+    // hopper with ground tea
+    ctx.fillStyle = PAL.steel;
+    ctx.beginPath();
+    ctx.moveTo(150, 380); ctx.lineTo(300, 380); ctx.lineTo(280, 470); ctx.lineTo(170, 470); ctx.closePath();
+    ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    const lvl = 1 - clamp((this.delivered + this.spilled) / 130, 0, 0.9);
+    ctx.fillStyle = '#5d4020';
+    ctx.beginPath();
+    ctx.moveTo(158 + 18 * (1 - lvl), 388 + 74 * (1 - lvl));
+    ctx.lineTo(292 - 18 * (1 - lvl), 388 + 74 * (1 - lvl));
+    ctx.lineTo(280, 470); ctx.lineTo(170, 470); ctx.closePath(); ctx.fill();
+    label(ctx, 'ground tea', 225, 486, F(12), PAL.woodDark, 'center');
+    // screw tube
+    ctx.save();
+    ctx.translate(this.base.x, this.base.y);
+    ctx.rotate(-a);
+    // trough under screw
+    ctx.fillStyle = PAL.woodDark;
+    rr(ctx, -26, this.tubeW / 2 - 4, this.len + 40, 12, 6); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // tube
+    ctx.fillStyle = PAL.copper;
+    rr(ctx, -14, -this.tubeW / 2, this.len + 14, this.tubeW, 12); ctx.fill();
+    ctx.lineWidth = 3.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // helix stripes (phase-shifted; move up-tube when spinning)
+    ctx.save();
+    rr(ctx, -14, -this.tubeW / 2, this.len + 14, this.tubeW, 12); ctx.clip();
+    const spacing = P.spacing;
+    const off = ((this.spin * spacing * 0.6) % spacing);
+    ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(58,44,35,0.55)';
+    for (let x = -spacing + off; x < this.len + spacing; x += spacing) {
+      ctx.beginPath();
+      ctx.moveTo(x, -this.tubeW / 2 + 2);
+      ctx.quadraticCurveTo(x + spacing * 0.55, 0, x, this.tubeW / 2 - 2);
+      ctx.stroke();
+    }
+    // tea riding the threads (only while running & reaching)
+    if (this.phase !== 'build') {
+      ctx.fillStyle = '#5d4020';
+      for (let x = -spacing + off; x < this.len + spacing; x += spacing) {
+        ctx.beginPath(); ctx.arc(x + spacing * 0.3, this.tubeW / 2 - 9, 5, 0, TAU); ctx.fill();
+      }
+    }
+    // shine
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(0, -this.tubeW / 2 + 8); ctx.lineTo(this.len - 8, -this.tubeW / 2 + 8); ctx.stroke();
+    ctx.restore();
+    ctx.restore();
+    // motor at base
+    ctx.fillStyle = PAL.steelDark;
+    rr(ctx, this.base.x - 46, this.base.y - 20, 52, 46, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    drawGear(ctx, this.base.x - 20, this.base.y + 2, 8, 14, this.spin * 2, PAL.brass);
+    label(ctx, 'MOTOR', this.base.x - 20, this.base.y + 42, F(11, true), PAL.ink, 'center');
+    // angle arc + label
+    ctx.save();
+    ctx.strokeStyle = PAL.tealDark; ctx.lineWidth = 2.5; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.arc(this.base.x, this.base.y, 70, -a, 0); ctx.stroke();
+    ctx.restore();
+    label(ctx, this.tilt.value + '°', this.base.x + 86, this.base.y - 12, F(15, true), PAL.tealDark);
+    // pot on wheeled cart, parked under the screw top
+    const cartX = clamp(top.x + 26, 380, 820);
+    const potRimY = 300;
+    ctx.save();
+    // stand pole
+    ctx.fillStyle = PAL.woodDark;
+    rr(ctx, cartX - 8, 360, 16, 150, 6); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // wheels
+    for (const wx of [-34, 34]) {
+      ctx.fillStyle = PAL.ink;
+      ctx.beginPath(); ctx.arc(cartX + wx, 508, 13, 0, TAU); ctx.fill();
+      ctx.fillStyle = PAL.grey;
+      ctx.beginPath(); ctx.arc(cartX + wx, 508, 6, 0, TAU); ctx.fill();
+    }
+    ctx.fillStyle = PAL.wood;
+    rr(ctx, cartX - 56, 486, 112, 16, 6); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // teapot sitting on platform
+    ctx.fillStyle = PAL.teal;
+    ctx.beginPath();
+    ctx.ellipse(cartX, 336, 52, 40, 0, 0, TAU);
+    ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // pot mouth (open funnel)
+    ctx.fillStyle = PAL.tealDark;
+    ctx.beginPath();
+    ctx.moveTo(cartX - 34, potRimY); ctx.lineTo(cartX + 34, potRimY);
+    ctx.lineTo(cartX + 20, potRimY + 22); ctx.lineTo(cartX - 20, potRimY + 22); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // spout
+    ctx.beginPath();
+    ctx.moveTo(cartX + 44, 330); ctx.quadraticCurveTo(cartX + 84, 320, cartX + 78, 292);
+    ctx.lineTo(cartX + 64, 296); ctx.quadraticCurveTo(cartX + 64, 318, cartX + 40, 318);
+    ctx.closePath(); ctx.fillStyle = PAL.teal; ctx.fill(); ctx.stroke();
+    // shine
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cartX - 32, 322); ctx.quadraticCurveTo(cartX - 38, 336, cartX - 32, 352); ctx.stroke();
+    label(ctx, 'THE POT', cartX, 396, F(12, true), '#fff', 'center');
+    // platform base under pot
+    ctx.fillStyle = PAL.wood;
+    rr(ctx, cartX - 46, 370, 92, 14, 6); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.restore();
+    // pot rim height guide
+    ctx.save();
+    ctx.setLineDash([6, 6]); ctx.strokeStyle = 'rgba(226,87,76,0.6)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(340, potRimY); ctx.lineTo(860, potRimY); ctx.stroke();
+    ctx.restore();
+    label(ctx, 'pot rim — screw must reach above this line', 600, potRimY - 10, F(12), PAL.redDark, 'center');
+    Particles.render(ctx);
+  }
+}
+STAGES.screw = new Stage2Screw(stageDef('screw'));
 // __STAGE3__
 // __STAGE4__
 // __STAGE5__
