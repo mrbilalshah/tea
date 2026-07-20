@@ -709,7 +709,10 @@ const Mentor = {
   update(dt){ this.t += dt; if (this.popT > 0) this.popT -= dt; },
   render(ctx){
     if (!this.text) return;
-    const bx = 118, bw = 560, by = H - 108, bh = 96;
+    const bx = 118, bw = 560;
+    const lines = textLines(ctx, this.text, bw - 32, F(15));
+    const bh = Math.max(96, 42 + lines.length * 20);
+    const by = H - 12 - bh;
     ctx.save();
     const pop = 1 + easeOut(this.popT / 0.25) * 0.04;
     // bubble
@@ -2112,7 +2115,204 @@ class Stage3Circuit extends StageBase {
   }
 }
 STAGES.circuit = new Stage3Circuit(stageDef('circuit'));
-// __STAGE4__
+// ---------- Stage 4: Brew Lab ----------
+// Diffusion: C(t) = 1 - e^(-r·t), r depends on temperature vs the tea's ideal range.
+// Bitterness ramps after the steep window (early + fast if the tea is scorched).
+// 1 game-minute = 2 real seconds. Pull the leaves inside the sweet zone!
+const TEAS = [
+  { id: 'green',  name: 'Green Tea',       idealT: [75, 85],  steep: [2, 3], color: '#8fae3c',
+    note: 'Delicate — scorches above 85°C!' },
+  { id: 'black',  name: 'Black Tea',       idealT: [90, 100], steep: [3, 5], color: '#8a4b1f',
+    note: 'Bold — loves properly hot water.' },
+  { id: 'herbal', name: 'Herbal Infusion', idealT: [95, 100], steep: [5, 7], color: '#c4762a',
+    note: 'Tough herbs — hot and patient.' },
+];
+class Stage4Brew extends StageBase {
+  setup(){
+    if (!Save.data.tea) { Save.data.tea = pick(TEAS).id; Save.save(); }
+    this.tea = TEAS.find(t => t.id === Save.data.tea) || TEAS[1];
+    const saved = Save.data.params.brew || {};
+    this.tempSlider = this.ui.add(new Slider({ x: 148, y: 306, w: 190, label: 'Water temperature', min: 60, max: 100, step: 5,
+      value: saved.temp || 80, format: v => v + ' °C' }));
+    this.concMeter = this.ui.add(new Meter({ x: 866, y: 120, w: 38, h: 190, max: 1, band: [0.55, 0.85], color: PAL.amber,
+      label: 'Strength', format: v => Math.round(v * 100) + '%' }));
+    this.bitterMeter = this.ui.add(new Meter({ x: 806, y: 120, w: 24, h: 190, max: 0.6, band: [0, 0.3], color: '#6b4a86',
+      label: 'Bitter', format: v => Math.round(v * 100) }));
+    this.pullBtn = new Button({ x: W - 230, y: H - 82, w: 210, h: 64, text: 'PULL THE LEAVES!', style: 'danger', fontSize: 18,
+      onClick: () => this.pull() });
+    this.C = 0; this.B = 0; this.pulled = false;
+  }
+  sayIntro(){
+    Mentor.say('Chemistry time! Steeping is DIFFUSION — flavour spreading from leaves into water, faster when hot. The order card says ' + this.tea.name.toLowerCase() + ': ' + this.tea.idealT[0] + '–' + this.tea.idealT[1] + '°C for ' + this.tea.steep[0] + '–' + this.tea.steep[1] + ' minutes. Set the temperature, press RUN, then pull the leaves at the perfect moment!', 'idle');
+  }
+  setParams(o){
+    if (o.temp != null) this.tempSlider.value = o.temp;
+    if (o.tea) { Save.data.tea = o.tea; Save.save(); this.tea = TEAS.find(t => t.id === o.tea); this.sayIntro(); }
+  }
+  winParams(){ return { tea: this.tea.id, temp: this.tempSlider.value, pullMin: Math.round(this.minutes() * 10) / 10, C: Math.round(this.C * 100) }; }
+  act(name){ if (name === 'pull') this.pull(); }
+  minutes(){ return this.runT / 2; }
+  brewRates(){
+    const T = this.tempSlider.value;
+    const [a, b] = this.tea.idealT;
+    const [m1, m2] = this.tea.steep;
+    const scorched = T > b;
+    let f;
+    if (T < a) f = Math.max(0.1, 1 - 0.05 * (a - T));
+    else if (scorched) f = 1.15;
+    else f = 1;
+    const r = 0.8 / m1 * f;
+    const tBitter = scorched ? m1 * 0.5 : m2;
+    const bRate = (scorched ? 0.5 : 0.25) * f; // bitter compounds diffuse slower in cool water too
+    return { r, tBitter, bRate, scorched };
+  }
+  startRun(){
+    this.C = 0; this.B = 0; this.pulled = false;
+    this.concMeter.value = 0; this.concMeter.shown = 0;
+    this.bitterMeter.value = 0; this.bitterMeter.shown = 0;
+    SFX.thunk();
+  }
+  updateRun(dt){
+    if (this.pulled) return;
+    const { r, tBitter, bRate } = this.brewRates();
+    const m = this.minutes();
+    this.C = 1 - Math.exp(-r * m);
+    this.B = Math.max(0, (m - tBitter) * bRate);
+    this.concMeter.value = this.C;
+    this.bitterMeter.value = this.B;
+    this.pullBtn.update(dt);
+    // diffusion wisps
+    if (Math.random() < dt * 10 * (1 - this.C)) {
+      Particles.spawn('drop', 560 + rand(-24, 24), 320 + rand(-6, 24), 1, { color: this.tea.color, vy: rand(10, 40) });
+    }
+    if (m >= 8) {
+      this.finish(false, 'FORGOT THE TEA!', 'You never pulled the leaves! After 8 minutes this is ' + this.tea.name.toLowerCase() + '-flavoured regret — pure bitterness. Diffusion never stops on its own!', 'shock');
+    }
+  }
+  pull(){
+    if (this.phase !== 'running' || this.pulled) return;
+    this.pulled = true;
+    SFX.thunk();
+    const { scorched } = this.brewRates();
+    const m = this.minutes();
+    const inBand = this.C >= 0.55 && this.C <= 0.85;
+    const okBitter = this.B <= 0.3;
+    if (inBand && okBitter) {
+      this.finish(true, 'PERFECT BREW!', fmt1(m) + ' minutes at ' + this.tempSlider.value + '°C — strength ' + Math.round(this.C * 100) + '%, hardly any bitterness. Diffusion, precisely controlled. You have the makings of a tea chemist!', 'cheer');
+    } else if (scorched && !okBitter) {
+      this.finish(false, 'SCORCHED!', this.tempSlider.value + '°C is TOO HOT for ' + this.tea.name.toLowerCase() + ' — the heat ripped out the bitter compounds almost immediately. Cooler water, gentler diffusion!', 'shock');
+    } else if (!okBitter || this.C > 0.85) {
+      this.finish(false, 'TOO BITTER!', 'Oversteeped — ' + fmt1(m) + ' minutes let too many bitter molecules diffuse out. Pekoe’s moustache is curling. Pull earlier next time!', 'sad');
+    } else {
+      this.finish(false, 'DISHWATER…', 'Pulled at ' + fmt1(m) + ' min — only ' + Math.round(this.C * 100) + '% strength. ' + (this.tempSlider.value < this.tea.idealT[0] ? 'The water was too cool — diffusion crawled along. Hotter!' : 'Give diffusion more time to work!'), 'sad');
+    }
+  }
+  updateAlways(dt){
+    if (this.phase === 'build') { this.concMeter.value = 0; this.bitterMeter.value = 0; }
+  }
+  onPointerDown(p){
+    if (this.phase === 'running') { this.pullBtn.down(p); return; }
+    super.onPointerDown(p);
+  }
+  renderWorld(ctx){
+    const teaC = this.tea.color;
+    // order card
+    panel(ctx, 118, 95, 252, 158, 14, '#fdf1d6');
+    label(ctx, '📋 ORDER CARD', 244, 120, F(14, true), PAL.redDark, 'center');
+    label(ctx, this.tea.name, 244, 148, F(21, true), PAL.ink, 'center');
+    label(ctx, 'Water: ' + this.tea.idealT[0] + '–' + this.tea.idealT[1] + ' °C', 244, 176, F(15), PAL.ink, 'center');
+    label(ctx, 'Steep: ' + this.tea.steep[0] + '–' + this.tea.steep[1] + ' min', 244, 198, F(15), PAL.ink, 'center');
+    label(ctx, this.tea.note, 244, 226, F(12), PAL.woodDark, 'center');
+    // temp control
+    panel(ctx, 118, 262, 252, 82, 14, PAL.paper);
+    // steep clock
+    if (this.phase !== 'build') {
+      const m = this.minutes();
+      panel(ctx, 118, 370, 252, 74, 14, PAL.paper);
+      label(ctx, 'STEEPING TIME', 244, 394, F(12, true), PAL.tealDark, 'center');
+      label(ctx, fmt1(Math.min(8, m)) + ' min', 244, 428, F(26, true), m > this.tea.steep[1] ? PAL.redDark : PAL.ink, 'center');
+    }
+    // glass teapot
+    const px = 570, py = 330, pr = 105;
+    ctx.save();
+    // glass body
+    ctx.beginPath(); ctx.arc(px, py, pr, 0.15 * Math.PI, 0.85 * Math.PI, false);
+    ctx.arc(px, py, pr, 0.85 * Math.PI, 0.15 * Math.PI, false);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(215,235,230,0.5)';
+    ctx.beginPath(); ctx.arc(px, py, pr, 0, TAU); ctx.fill();
+    // liquid
+    const strength = clamp(this.C / 0.85, 0, 1);
+    const murk = clamp(this.B / 0.5, 0, 1);
+    let liquid = mixColor('#dcece8', teaC, 0.12 + strength * 0.88);
+    if (murk > 0) liquid = mixColor(liquid, '#3d2a14', murk * 0.7);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(px, py, pr - 6, 0, TAU); ctx.clip();
+    ctx.fillStyle = liquid;
+    ctx.fillRect(px - pr, py - 30, pr * 2, pr + 36);
+    // wobble surface
+    ctx.beginPath();
+    ctx.moveTo(px - pr, py - 30);
+    for (let x = -pr; x <= pr; x += 8) {
+      ctx.lineTo(px + x, py - 30 + Math.sin(x / 14 + this.t * 3) * 2.4);
+    }
+    ctx.lineTo(px + pr, py - 22); ctx.lineTo(px - pr, py - 22); ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fill();
+    // diffusion glow around infuser
+    if (this.phase === 'running' && !this.pulled) {
+      const ir = 18 + this.C * 110;
+      const grad = ctx.createRadialGradient(px, py + 6, 4, px, py + 6, ir);
+      grad.addColorStop(0, teaC + '');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.globalAlpha = 0.5 * (1 - this.C * 0.6);
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(px, py + 6, ir, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+    // glass outline + shine
+    ctx.beginPath(); ctx.arc(px, py, pr, 0, TAU);
+    ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, pr - 6, 0, TAU);
+    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(px, py, pr - 22, Math.PI * 1.15, Math.PI * 1.4); ctx.stroke();
+    // spout + lid
+    ctx.fillStyle = 'rgba(215,235,230,0.8)';
+    ctx.beginPath();
+    ctx.moveTo(px + pr - 12, py - 30); ctx.quadraticCurveTo(px + pr + 40, py - 46, px + pr + 34, py - 74);
+    ctx.lineTo(px + pr + 18, py - 66); ctx.quadraticCurveTo(px + pr + 12, py - 46, px + pr - 18, py - 44);
+    ctx.closePath(); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.fillStyle = PAL.teal;
+    ctx.beginPath(); ctx.ellipse(px, py - pr + 2, 40, 12, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py - pr - 10, 8, 0, TAU); ctx.fillStyle = PAL.brass; ctx.fill(); ctx.stroke();
+    // infuser (bobs while steeping, lifts out when pulled)
+    const steeping = this.phase === 'running' && !this.pulled;
+    const lift = this.pulled || this.phase === 'result' ? -110 : 0;
+    const bob = steeping ? Math.sin(this.t * 2.5) * 6 : 0;
+    const iy = py + 8 + bob + lift;
+    ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(px, py - pr - 18); ctx.lineTo(px, iy - 20); ctx.stroke();
+    ctx.fillStyle = PAL.steel;
+    ctx.beginPath(); ctx.arc(px, iy, 20, 0, TAU); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.fillStyle = PAL.ink;
+    for (let hx = -1; hx <= 1; hx++) for (let hy = -1; hy <= 1; hy++) {
+      ctx.beginPath(); ctx.arc(px + hx * 9, iy + hy * 9, 1.8, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+    // burner stand
+    ctx.fillStyle = PAL.woodDark;
+    rr(ctx, px - 70, py + pr + 2, 140, 14, 7); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    label(ctx, this.tempSlider.value + ' °C', px, py + pr + 44, F(16, true),
+      this.brewRates().scorched ? PAL.redDark : PAL.ink, 'center');
+    Particles.render(ctx);
+    if (this.phase === 'running' && !this.pulled) this.pullBtn.render(ctx);
+  }
+}
+STAGES.brew = new Stage4Brew(stageDef('brew'));
 // __STAGE5__
 // fallback stubs for any stage not yet implemented
 for (const d of STAGE_DEFS) {
@@ -2147,6 +2347,7 @@ window.TTM = {
     return { screen: this.screenId(), phase: s && s.phase, result: s && s.result, unlocked: Save.data.unlocked };
   },
   pressRun(){ if (Game.screen && Game.screen.pressRun) Game.screen.pressRun(); },
+  act(name){ if (Game.screen && Game.screen.act) Game.screen.act(name); },
   setParams(o){ if (Game.screen && Game.screen.setParams) Game.screen.setParams(o); },
   continue_(){ const s = Game.screen; if (s && s.phase === 'result' && s.result && s.result.win) s.continueAfterWin(); }
 };

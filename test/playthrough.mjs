@@ -126,6 +126,40 @@ await runStage('circuit', 'fail: incomplete loop',
   { v: 12, coils: { a: 3, b: null }, wires: { w1: 1 }, switchOn: true }, false);
 check('unlocked stage 4', (await state()).unlocked >= 4);
 
+// ---------- Stage 4: brew ----------
+console.log('Stage 4 — Brew Lab');
+// force green tea for deterministic timing: sweet window ≈ 4.0–8.4 s real time at 80°C
+await page.evaluate(() => window.TTM.goto('brew'));
+await page.waitForTimeout(300);
+await page.evaluate(() => window.TTM.setParams({ tea: 'green', temp: 80 }));
+await page.waitForTimeout(200);
+await shot('stage4-build');
+await page.evaluate(() => window.TTM.pressRun());
+await page.waitForTimeout(3000);
+await shot('stage4-running');
+await page.waitForTimeout(3000); // total ~6 s => ~3 min steep, inside band
+await page.evaluate(() => window.TTM.act('pull'));
+let s4 = await waitResult();
+await shot('stage4-result');
+check('win: green tea pulled in the zone', s4.result && s4.result.win === true, s4.result && s4.result.title);
+
+async function brewCase(name, params, pullAfterMs, expectTitle) {
+  await page.evaluate(() => window.TTM.goto('brew'));
+  await page.waitForTimeout(250);
+  await page.evaluate(p => window.TTM.setParams(p), params);
+  await page.evaluate(() => window.TTM.pressRun());
+  if (pullAfterMs) { await page.waitForTimeout(pullAfterMs); await page.evaluate(() => window.TTM.act('pull')); }
+  const s = await waitResult(25000);
+  const t = s.result && s.result.title;
+  check(name, s.result && s.result.win === false && (!expectTitle || t === expectTitle), t);
+}
+await brewCase('fail: pulled too early', { tea: 'green', temp: 80 }, 1500, 'DISHWATER…');
+await brewCase('fail: scorched green tea', { tea: 'green', temp: 100 }, 6000, 'SCORCHED!');
+await brewCase('fail: oversteeped', { tea: 'green', temp: 80 }, 12000, 'TOO BITTER!');
+await brewCase('fail: never pulled', { tea: 'green', temp: 80 }, 0, 'FORGOT THE TEA!');
+await brewCase('fail: too cold for black tea', { tea: 'black', temp: 60 }, 14000, 'DISHWATER…');
+check('unlocked stage 5', (await state()).unlocked >= 5);
+
 // ---------- persistence ----------
 console.log('Persistence');
 await page.reload();
