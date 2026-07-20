@@ -160,6 +160,29 @@ await brewCase('fail: never pulled', { tea: 'green', temp: 80 }, 0, 'FORGOT THE 
 await brewCase('fail: too cold for black tea', { tea: 'black', temp: 60 }, 14000, 'DISHWATER…');
 check('unlocked stage 5', (await state()).unlocked >= 5);
 
+// ---------- Stage 5: assembly ----------
+console.log('Stage 5 — Grand Assembly');
+await page.evaluate(() => window.TTM.goto('assembly'));
+await page.waitForTimeout(300);
+// wrong mix first
+await page.evaluate(() => window.TTM.setParams({ milk: 3, sugar: 9 }));
+await page.evaluate(() => window.TTM.pressRun());
+await page.waitForTimeout(300);
+let s5 = await state();
+check('fail: wrong milk/sugar mix', s5.result && s5.result.win === false, s5.result && s5.result.title);
+// now match the order and pull the lever
+await page.evaluate(() => window.TTM.goto('assembly'));
+await page.waitForTimeout(300);
+const order = await page.evaluate(() => window.TTM.Game.screen.order);
+await page.evaluate(o => window.TTM.setParams({ milk: o.milk, sugar: o.sugar }), order);
+await shot('stage5-build');
+await page.evaluate(() => window.TTM.pressRun());
+await page.waitForTimeout(2000); await shot('stage5-montage1');
+await page.waitForTimeout(6000); await shot('stage5-montage3');
+s5 = await waitResult(25000);
+await shot('stage5-certificate');
+check('win: full machine montage completes', s5.result && s5.result.win === true, s5.result && s5.result.title);
+
 // ---------- persistence ----------
 console.log('Persistence');
 await page.reload();
