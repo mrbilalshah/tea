@@ -56,8 +56,12 @@ celebrated, because that's how engineering works.
   on each stage (great for classrooms).
 - **Certificate**: add your name and print it.
 - **Accessibility**: colorblind-safe gauge markings (✓/hatching, not just
-  color), `prefers-reduced-motion` support, gentle generative music and sound
-  with separate toggles, and a rotate prompt on portrait phones.
+  color), `prefers-reduced-motion` support, and gentle generative music and
+  sound with separate toggles.
+- **Made for mobile**: on phones the game auto-rotates its render — hold the
+  phone any way, turn it sideways, and it just works (even with rotation lock
+  on). Touch targets grow at small sizes, and a ⛶ button enters fullscreen
+  with a landscape lock where the browser supports it.
 
 ## Tech notes
 

@@ -1,6 +1,6 @@
 // Cache-first service worker so The Great Tea Machine works offline once visited.
 // Bump CACHE on releases to push updates.
-const CACHE = 'ttm-v2';
+const CACHE = 'ttm-v3';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', e => {

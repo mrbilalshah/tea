@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>The Great Tea Machine</title>
 <style>
-  html, body { margin:0; padding:0; height:100%; background:#2e2620; overflow:hidden; }
+  html, body { margin:0; padding:0; height:100%; background:#2e2620; overflow:hidden;
+    overscroll-behavior:none; -webkit-touch-callout:none; touch-action:none; }
   #game { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
   canvas { display:block; touch-action:none; user-select:none; -webkit-user-select:none; cursor:default; }
   #printCert { display:none; }
@@ -373,7 +374,10 @@ class Button {
       disabled:false, fontSize:20, onClick:null, icon:null }, o);
     this.pressT = 0;
   }
-  contains(p){ return p.x >= this.x && p.x <= this.x + this.w && p.y >= this.y && p.y <= this.y + this.h; }
+  contains(p){
+    const s = hitSlop();
+    return p.x >= this.x - s && p.x <= this.x + this.w + s && p.y >= this.y - s && p.y <= this.y + this.h + s;
+  }
   down(p){
     if (!this.visible || this.disabled || !this.contains(p)) return false;
     this.pressT = 0.18; SFX.click();
@@ -427,7 +431,8 @@ class Slider {
   }
   down(p){
     if (!this.visible || this.disabled) return false;
-    if (p.x >= this.x - 16 && p.x <= this.x + this.w + 16 && p.y >= this.y - 20 && p.y <= this.y + 22) {
+    const s = hitSlop();
+    if (p.x >= this.x - 16 - s && p.x <= this.x + this.w + 16 + s && p.y >= this.y - 20 - s && p.y <= this.y + 22 + s) {
       this.drag = true; this.setFromX(p.x); SFX.click(); return true;
     }
     return false;
@@ -840,18 +845,33 @@ const Mentor = {
 // ===================== 9. GAME SHELL =====================
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-const view = { scale: 1, px: 1 };
+const view = { scale: 1, px: 1, rotated: false };
 function resize(){
-  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.style.width = (W * s) + 'px';
-  canvas.style.height = (H * s) + 'px';
-  canvas.width = Math.round(W * s * dpr);
-  canvas.height = Math.round(H * s * dpr);
+  const ww = window.innerWidth, wh = window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  // portrait phones: render the landscape game rotated 90° so simply turning the
+  // phone works even with rotation lock on — no layout changes needed
+  view.rotated = wh > ww;
+  const s = view.rotated ? Math.min(ww / H, wh / W) : Math.min(ww / W, wh / H);
+  const cssW = view.rotated ? H * s : W * s;
+  const cssH = view.rotated ? W * s : H * s;
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
   view.scale = s; view.px = s * dpr;
 }
 window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', resize);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
+document.addEventListener('fullscreenchange', resize);
 resize();
+function baseTransform(){
+  if (view.rotated) ctx.setTransform(0, view.px, -view.px, 0, canvas.width, 0);
+  else ctx.setTransform(view.px, 0, 0, view.px, 0, 0);
+}
+// extra logical pixels added to hit targets when the game is scaled small (phones)
+function hitSlop(){ return clamp((0.8 - view.scale) * 40, 0, 14); }
 
 const Game = {
   screen: null, time: 0, fade: 0,
@@ -880,11 +900,55 @@ function drawStar(ctx, x, y, r, on, pulse){
   ctx.lineWidth = Math.max(1.5, r * 0.12); ctx.strokeStyle = PAL.ink; ctx.stroke();
   ctx.restore();
 }
-// global HUD: sound + music toggles (drawn on every screen, top-right corner)
+// global HUD: fullscreen + sound + music toggles (drawn on every screen, top-right corner)
+const fsBtn = {
+  x: W - 134, y: 10, w: 36, h: 36,
+  available: !!(document.documentElement.requestFullscreen && navigator.maxTouchPoints > 0),
+  down(p){
+    const s = hitSlop();
+    if (!this.available) return false;
+    if (p.x >= this.x - s && p.x <= this.x + this.w + s && p.y >= this.y - s && p.y <= this.y + this.h + s) {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+          .then(() => {
+            if (screen.orientation && screen.orientation.lock) {
+              screen.orientation.lock('landscape').catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
+      SFX.click();
+      return true;
+    }
+    return false;
+  },
+  render(ctx){
+    if (!this.available) return;
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = PAL.cream; rr(ctx, this.x, this.y, this.w, this.h, 10); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // expand/contract corner arrows
+    ctx.strokeStyle = PAL.ink; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    const m = 9, k = 8, xr = this.x + this.w - m, yb = this.y + this.h - m;
+    for (const [cx2, cy2, dx, dy] of [
+      [this.x + m, this.y + m, 1, 1], [xr, this.y + m, -1, 1],
+      [this.x + m, yb, 1, -1], [xr, yb, -1, -1],
+    ]) {
+      ctx.beginPath();
+      ctx.moveTo(cx2 + dx * k, cy2); ctx.lineTo(cx2, cy2); ctx.lineTo(cx2, cy2 + dy * k);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+};
 const musicBtn = {
   x: W - 90, y: 10, w: 36, h: 36,
   down(p){
-    if (p.x >= this.x && p.x <= this.x + this.w && p.y >= this.y && p.y <= this.y + this.h) {
+    const s = hitSlop();
+    if (p.x >= this.x - s && p.x <= this.x + this.w + s && p.y >= this.y - s && p.y <= this.y + this.h + s) {
       Music.enabled = !Music.enabled;
       Save.data.music = Music.enabled; Save.save();
       if (Music.enabled) Music.start(); else Music.stop();
@@ -914,7 +978,8 @@ const musicBtn = {
 const soundBtn = {
   x: W - 46, y: 10, w: 36, h: 36,
   down(p){
-    if (p.x >= this.x && p.x <= this.x + this.w && p.y >= this.y && p.y <= this.y + this.h) {
+    const s = hitSlop();
+    if (p.x >= this.x - s && p.x <= this.x + this.w + s && p.y >= this.y - s && p.y <= this.y + this.h + s) {
       SFX.enabled = !SFX.enabled;
       Save.data.sound = SFX.enabled; Save.save();
       if (SFX.enabled) SFX.click();
@@ -949,7 +1014,9 @@ const soundBtn = {
 
 function pointerPos(e){
   const r = canvas.getBoundingClientRect();
-  return { x: (e.clientX - r.left) / view.scale, y: (e.clientY - r.top) / view.scale };
+  const cx = e.clientX - r.left, cy = e.clientY - r.top;
+  if (view.rotated) return { x: cy / view.scale, y: (r.width - cx) / view.scale };
+  return { x: cx / view.scale, y: cy / view.scale };
 }
 canvas.addEventListener('pointerdown', e => {
   e.preventDefault();
@@ -958,6 +1025,7 @@ canvas.addEventListener('pointerdown', e => {
   const p = pointerPos(e);
   if (soundBtn.down(p)) return;
   if (musicBtn.down(p)) return;
+  if (fsBtn.down(p)) return;
   if (Game.screen && Game.screen.onPointerDown) Game.screen.onPointerDown(p);
 });
 canvas.addEventListener('pointermove', e => {
@@ -977,16 +1045,7 @@ function frame(tNow){
   const dt = Math.min((tNow - tPrev) / 1000, 1 / 20);
   tPrev = tNow;
   Game.time += dt;
-  ctx.setTransform(view.px, 0, 0, view.px, 0, 0);
-  // portrait phones: pause and ask for landscape
-  if (window.innerHeight > window.innerWidth && window.innerWidth < 700) {
-    ctx.fillStyle = PAL.bg; ctx.fillRect(0, 0, W, H);
-    drawPekoe(ctx, W / 2, H / 2 - 90, 1.6, 'think', Game.time);
-    label(ctx, 'Please rotate your device!', W / 2, H / 2 + 20, F(30, true), PAL.ink, 'center');
-    label(ctx, 'The Tea Machine needs a landscape workshop ☕', W / 2, H / 2 + 56, F(17), PAL.woodDark, 'center');
-    requestAnimationFrame(frame);
-    return;
-  }
+  baseTransform();
   if (Game.screen) {
     if (Game.screen.update) Game.screen.update(dt);
     Particles.update(dt);
@@ -996,6 +1055,7 @@ function frame(tNow){
     if (Game.screen.render) Game.screen.render(ctx);
     soundBtn.render(ctx);
     musicBtn.render(ctx);
+    fsBtn.render(ctx);
     if (Game.fade > 0) {
       Game.fade -= dt * 4;
       ctx.globalAlpha = clamp(Game.fade, 0, 1);
@@ -1424,7 +1484,8 @@ const MapScreen = {
     if (this.menu.down(p)) return;
     for (const n of this.nodes) {
       const dx = p.x - n.x, dy = p.y - n.y;
-      if (dx * dx + dy * dy < 52 * 52) {
+      const r = 52 + hitSlop();
+      if (dx * dx + dy * dy < r * r) {
         if (Save.isUnlocked(n.def.id)) {
           SFX.click();
           Game.goto(STAGES[n.def.id]);
@@ -1939,7 +2000,7 @@ class Stage1Gears extends StageBase {
     for (const g of this.gears) {
       if (g.loc === 'drag') continue;
       const pos = this.gearPos(g);
-      const r = Math.max(28, gearR(g.teeth) * (g.loc === 'tray' ? 0.55 : 1));
+      const r = Math.max(28, gearR(g.teeth) * (g.loc === 'tray' ? 0.55 : 1)) + hitSlop();
       if ((p.x - pos.x) ** 2 + (p.y - pos.y) ** 2 < r * r) {
         g.prevLoc = g.loc;
         g.loc = 'drag'; g.x = p.x; g.y = p.y;
@@ -2526,8 +2587,9 @@ class Stage3Circuit extends StageBase {
   }
   coilRect(which){ return { x: 588, y: which === 'a' ? 148 : 263, w: 108, h: 44 }; }
   worldDown(p){
+    const slop = hitSlop();
     // switch
-    if (Math.hypot(p.x - 440, p.y - 232) < 30) {
+    if (Math.hypot(p.x - 440, p.y - 232) < 30 + slop) {
       this.switchOn = !this.switchOn;
       SFX.thunk();
       return;
@@ -2535,7 +2597,7 @@ class Stage3Circuit extends StageBase {
     // sockets
     for (const which of ['a', 'b']) {
       const r = this.coilRect(which);
-      if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) {
+      if (p.x >= r.x - slop && p.x <= r.x + r.w + slop && p.y >= r.y - slop && p.y <= r.y + r.h + slop) {
         this.coils[which] = this.coils[which] === null ? 3 : this.coils[which] === 3 ? 6 : null;
         SFX.click();
         return;
@@ -2543,7 +2605,7 @@ class Stage3Circuit extends StageBase {
     }
     // wires
     for (const id in S3_WIRES) {
-      if (distToPoly(S3_WIRES[id].pts, p) < 13) {
+      if (distToPoly(S3_WIRES[id].pts, p) < 13 + slop) {
         this.wires[id] = !this.wires[id];
         SFX.click();
         return;
