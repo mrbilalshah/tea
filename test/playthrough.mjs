@@ -106,6 +106,26 @@ await runStage('screw', 'fail: fast+wide is messy', { tilt: 45, pitch: 2, speed:
 await runStage('screw', 'fail: too slow', { tilt: 45, pitch: 0, speed: 0.5 }, false, null, null, 20000);
 check('unlocked stage 3', (await state()).unlocked >= 3);
 
+// ---------- Stage 3: circuit ----------
+console.log('Stage 3 — Boiler Circuit');
+await runStage('circuit', 'win: 12V single 3Ω coil (48 W)',
+  { v: 12, coils: { a: 3, b: null }, wires: { w1: 1, w2: 1 }, switchOn: true }, true, 'stage3', 3500);
+await runStage('circuit', 'win: 12V parallel 6||6 (48 W)',
+  { v: 12, coils: { a: 6, b: 6 }, wires: { w1: 1, w2: 1, w3: 1, w4: 1 }, switchOn: true }, true);
+await runStage('circuit', 'win: 24V series 3+6 (64 W)',
+  { v: 24, coils: { a: 3, b: 6 }, wires: { w1: 1, w5: 1, w4: 1 }, switchOn: true }, true);
+await runStage('circuit', 'fail: short circuit via bypass',
+  { v: 12, coils: { a: 3, b: null }, wires: { w1: 1, w2: 1, w6: 1 }, switchOn: true }, false, 'stage3-short', 1200);
+await runStage('circuit', 'fail: fuse blows at 24V/3Ω (192 W)',
+  { v: 24, coils: { a: 3, b: null }, wires: { w1: 1, w2: 1 }, switchOn: true }, false, 'stage3-fuse', 2200);
+await runStage('circuit', 'fail: too weak at 6V (12 W)',
+  { v: 6, coils: { a: 3, b: null }, wires: { w1: 1, w2: 1 }, switchOn: true }, false);
+await runStage('circuit', 'fail: switch left open',
+  { v: 12, coils: { a: 3, b: null }, wires: { w1: 1, w2: 1 }, switchOn: false }, false);
+await runStage('circuit', 'fail: incomplete loop',
+  { v: 12, coils: { a: 3, b: null }, wires: { w1: 1 }, switchOn: true }, false);
+check('unlocked stage 4', (await state()).unlocked >= 4);
+
 // ---------- persistence ----------
 console.log('Persistence');
 await page.reload();

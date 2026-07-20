@@ -1764,7 +1764,354 @@ class Stage2Screw extends StageBase {
   }
 }
 STAGES.screw = new Stage2Screw(stageDef('screw'));
-// __STAGE3__
+// ---------- Stage 3: Boiler Circuit ----------
+// Real nodal analysis on a fixed 6-wire board. Unknown nodes: N1, A_in, A_out, B_in, B_out.
+// N2 = ground. Battery: ideal V behind r=0.05. Coils: 3 or 6 ohm. Win: 40-70 W into the coils.
+function solveLinear(A, b){
+  const n = b.length;
+  const M = A.map((row, i) => row.concat([b[i]]));
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let rI = c + 1; rI < n; rI++) if (Math.abs(M[rI][c]) > Math.abs(M[piv][c])) piv = rI;
+    [M[c], M[piv]] = [M[piv], M[c]];
+    if (Math.abs(M[c][c]) < 1e-12) continue;
+    for (let rI = 0; rI < n; rI++) {
+      if (rI === c) continue;
+      const f = M[rI][c] / M[c][c];
+      for (let k = c; k <= n; k++) M[rI][k] -= f * M[c][k];
+    }
+  }
+  return M.map((row, i) => Math.abs(row[i]) < 1e-12 ? 0 : row[n] / row[i]);
+}
+const S3_WIRES = {
+  w1: { pts: [[470,140],[540,140],[540,170],[592,170]], from: 'N1', to: 'Ain' },
+  w2: { pts: [[692,170],[850,170]], from: 'Aout', to: 'N2' },
+  w3: { pts: [[470,140],[505,140],[505,285],[592,285]], from: 'N1', to: 'Bin' },
+  w4: { pts: [[692,285],[850,285]], from: 'Bout', to: 'N2' },
+  w5: { pts: [[692,170],[722,170],[722,232],[560,232],[560,285],[592,285]], from: 'Aout', to: 'Bin' },
+  w6: { pts: [[470,140],[470,106],[850,106],[850,170]], from: 'N1', to: 'N2' },
+};
+const S3_NODE_IDX = { N1: 0, Ain: 1, Aout: 2, Bin: 3, Bout: 4 }; // N2 = ground
+function polyLen(pts){
+  let L = 0;
+  for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  return L;
+}
+function polyPoint(pts, dist){
+  for (let i = 1; i < pts.length; i++) {
+    const seg = Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+    if (dist <= seg) {
+      const t = dist / seg;
+      return [lerp(pts[i-1][0], pts[i][0], t), lerp(pts[i-1][1], pts[i][1], t)];
+    }
+    dist -= seg;
+  }
+  return pts[pts.length - 1];
+}
+function distToPoly(pts, p){
+  let best = 1e9;
+  for (let i = 1; i < pts.length; i++) {
+    const [x1,y1] = pts[i-1], [x2,y2] = pts[i];
+    const dx = x2-x1, dy = y2-y1;
+    const len2 = dx*dx + dy*dy;
+    const t = len2 ? clamp(((p.x-x1)*dx + (p.y-y1)*dy) / len2, 0, 1) : 0;
+    best = Math.min(best, Math.hypot(p.x - (x1 + dx*t), p.y - (y1 + dy*t)));
+  }
+  return best;
+}
+class Stage3Circuit extends StageBase {
+  setup(){
+    const saved = Save.data.params.circuit || {};
+    this.wires = Object.assign({ w1: false, w2: false, w3: false, w4: false, w5: false, w6: false }, saved.wires || {});
+    this.coils = Object.assign({ a: null, b: null }, saved.coils || {});
+    this.switchOn = false; // always start open: flipping it is part of the fun
+    this.temp = 20;
+    this.fuseBlown = false;
+    this.shorted = false;
+    this.whistled = false;
+    this.dotT = 0;
+    this.battSel = this.ui.add(new Selector({ x: 140, y: 152, w: 210, h: 40, label: 'Battery voltage',
+      options: [{label:'6 V',value:6},{label:'12 V',value:12},{label:'24 V',value:24}],
+      index: saved.v === 6 ? 0 : saved.v === 24 ? 2 : 1 }));
+    this.powerGauge = this.ui.add(new Gauge({ x: 245, y: 288, r: 46, min: 0, max: 120, unit: 'W', label: 'Heating power',
+      bands: [{from:0,to:40,color:PAL.greyLite},{from:40,to:70,color:PAL.green},{from:70,to:120,color:PAL.red}] }));
+    this.thermo = this.ui.add(new Meter({ x: 316, y: 360, w: 26, h: 130, max: 110, band: [100, 110], color: PAL.red,
+      label: '°C', format: v => Math.round(v) + '°' }));
+  }
+  sayIntro(){
+    Mentor.say('Electrical engineering time! Wire the battery to the heating coils: tap the dashed wires to connect them, tap a socket to add a coil. We need 40–70 watts — less won’t boil, more blows the fuse. And DON’T give the current a shortcut around the coils!', 'idle');
+  }
+  setParams(o){
+    if (o.v) this.battSel.index = { 6:0, 12:1, 24:2 }[o.v];
+    if (o.coils) this.coils = Object.assign({ a: null, b: null }, o.coils);
+    if (o.wires) this.wires = Object.assign({ w1:false,w2:false,w3:false,w4:false,w5:false,w6:false }, o.wires);
+    if (o.switchOn != null) this.switchOn = o.switchOn;
+  }
+  winParams(){
+    const s = this.solve();
+    return { v: this.battSel.value, coils: this.coils, wires: this.wires, watts: Math.round(s.P) };
+  }
+  solve(){
+    const V = this.battSel.value;
+    const G = Array.from({ length: 5 }, () => [0,0,0,0,0]);
+    const rhs = [0,0,0,0,0];
+    for (let i = 0; i < 5; i++) G[i][i] += 1e-9; // tiny leak keeps matrix non-singular
+    const addEdge = (na, nb, g) => {
+      const a = S3_NODE_IDX[na], b = S3_NODE_IDX[nb];
+      if (a !== undefined) G[a][a] += g;
+      if (b !== undefined) G[b][b] += g;
+      if (a !== undefined && b !== undefined) { G[a][b] -= g; G[b][a] -= g; }
+    };
+    if (this.switchOn) { G[0][0] += 20; rhs[0] += 20 * V; } // battery + fuse + switch into N1, r=0.05
+    const GW = 1000;
+    for (const id in this.wires) if (this.wires[id]) addEdge(S3_WIRES[id].from, S3_WIRES[id].to, GW);
+    if (this.coils.a) addEdge('Ain', 'Aout', 1 / this.coils.a);
+    if (this.coils.b) addEdge('Bin', 'Bout', 1 / this.coils.b);
+    const v = solveLinear(G, rhs);
+    const I = this.switchOn ? (V - v[0]) * 20 : 0;
+    const PA = this.coils.a ? (v[1] - v[2]) ** 2 / this.coils.a : 0;
+    const PB = this.coils.b ? (v[3] - v[4]) ** 2 / this.coils.b : 0;
+    const Rext = I > 0.001 ? v[0] / I : Infinity;
+    const wireI = {};
+    for (const id in S3_WIRES) {
+      if (!this.wires[id]) { wireI[id] = 0; continue; }
+      const wd = S3_WIRES[id];
+      const va = wd.from === 'N2' ? 0 : v[S3_NODE_IDX[wd.from]];
+      const vb = wd.to === 'N2' ? 0 : v[S3_NODE_IDX[wd.to]];
+      wireI[id] = (va - vb) * GW;
+    }
+    return { V, I, PA, PB, P: PA + PB, Rext, open: I < 0.001, short: I > 0.001 && Rext < 0.5, wireI, v };
+  }
+  startRun(){
+    this.temp = 20;
+    this.fuseBlown = false;
+    this.shorted = false;
+    this.whistled = false;
+    this.sim = this.solve();
+    SFX.thunk();
+  }
+  updateRun(dt){
+    const s = this.sim;
+    this.powerGauge.value = s.short || s.open ? 0 : Math.min(120, s.P) * Math.min(1, this.runT / 0.8);
+    this.dotT += dt;
+    if (s.short && !this.shorted && this.runT > 0.9) {
+      this.shorted = true;
+      SFX.spark(); SFX.pop();
+      Particles.spawn('spark', 660, 200, 26);
+      Particles.spawn('puff', 470, 190, 8);
+      this.finish(false, 'SHORT CIRCUIT!', 'The current found a shortcut with (almost) zero resistance and skipped the coils — ' + Math.round(s.I) + ' amps of nope! The breaker popped. Remove the shortcut wire so current must pass THROUGH a coil.', 'shock');
+      return;
+    }
+    if (s.open && this.runT > 1.4) {
+      this.finish(false, 'NO CURRENT!', this.switchOn
+        ? 'The circuit is not a complete loop, so no current can flow. Every electron needs a full path: battery → coil → back to battery. Check the dashed wires!'
+        : 'Everything is wired… but the SWITCH is open! Tap the switch to close it, then run again.', 'think');
+      return;
+    }
+    if (!s.open && !s.short) {
+      if (s.P > 70 && this.runT > 1.6 && !this.fuseBlown) {
+        this.fuseBlown = true;
+        SFX.pop();
+        Particles.spawn('spark', 440, 185, 16);
+        Particles.spawn('puff', 440, 185, 6);
+        this.finish(false, 'FUSE BLOWN!', Math.round(s.P) + ' watts is too much for our 70 W fuse — POP! P = V²÷R, so try lower voltage or MORE resistance (coils in series add up).', 'shock');
+        return;
+      }
+      if (s.P <= 70) {
+        // heat the water: equilibrium temp = 20 + 2P
+        this.temp += (s.P - (this.temp - 20) * 0.5) / 2.5 * dt;
+        this.thermo.value = this.temp;
+        if (this.temp > 45 && Math.random() < dt * (this.temp - 40) / 6) {
+          Particles.spawn('bubble', 222 + rand(-28, 28), 462, 1);
+          if (Math.random() < 0.3) SFX.bubble();
+        }
+        if (this.temp > 90) Particles.spawn('steam', 140, 398, 1);
+        if (this.temp >= 100) {
+          if (!this.whistled) { this.whistled = true; SFX.whistle(); }
+          const cfg = this.coils.a && this.coils.b ? (this.wires.w5 ? 'in SERIES' : 'in PARALLEL') : 'solo';
+          this.finish(true, 'STEAM WHISTLE!', '100°C at ' + Math.round(s.P) + ' watts — beautiful! V=' + s.V + ' V, R=' + fmt1(s.Rext) + ' Ω, so I=' + fmt1(s.I) + ' A. Your coils ' + cfg + ' hit the sweet spot. Ohm’s law obeyed!', 'cheer');
+          return;
+        }
+        if (this.runT > 12) {
+          this.finish(false, 'NOT HOT ENOUGH…', 'Stuck at ' + Math.round(this.temp) + '°C. Only ' + Math.round(s.P) + ' watts — the heat leaks out as fast as we make it. More voltage, or LESS resistance (parallel coils!), for more power.', 'sad');
+          return;
+        }
+      }
+    }
+  }
+  updateAlways(dt){
+    if (this.phase === 'build') { this.thermo.value = 20; this.powerGauge.value = 0; }
+    if (this.phase === 'result' && this.result.win) {
+      this.dotT += dt;
+      if (Math.random() < dt * 6) Particles.spawn('steam', 140, 398, 1);
+    }
+  }
+  coilRect(which){ return { x: 588, y: which === 'a' ? 148 : 263, w: 108, h: 44 }; }
+  worldDown(p){
+    // switch
+    if (Math.hypot(p.x - 440, p.y - 232) < 30) {
+      this.switchOn = !this.switchOn;
+      SFX.thunk();
+      return;
+    }
+    // sockets
+    for (const which of ['a', 'b']) {
+      const r = this.coilRect(which);
+      if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) {
+        this.coils[which] = this.coils[which] === null ? 3 : this.coils[which] === 3 ? 6 : null;
+        SFX.click();
+        return;
+      }
+    }
+    // wires
+    for (const id in S3_WIRES) {
+      if (distToPoly(S3_WIRES[id].pts, p) < 13) {
+        this.wires[id] = !this.wires[id];
+        SFX.click();
+        return;
+      }
+    }
+  }
+  renderWorld(ctx){
+    // left panel: power supply + gauge
+    panel(ctx, 120, 95, 250, 250, 14, PAL.paper);
+    label(ctx, 'POWER STATION', 245, 116, F(13, true), PAL.tealDark, 'center');
+    label(ctx, 'Fuse limit: 70 W', 245, 334, F(12), PAL.redDark, 'center');
+    // kettle + thermometer
+    label(ctx, 'WATER TANK', 222, 372, F(12, true), PAL.woodDark, 'center');
+    drawKettle(ctx, 222, 482, 1.05, { color: PAL.steel });
+    // heating element under kettle
+    ctx.fillStyle = this.phase !== 'build' && this.sim && !this.sim.open && !this.sim.short && !this.fuseBlown
+      ? mixColor('#8f6240', '#ff5a2e', clamp((this.sim.P) / 70, 0, 1)) : PAL.woodDark;
+    rr(ctx, 162, 484, 120, 12, 6); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // circuit board
+    panel(ctx, 385, 92, 550, 350, 14, '#e9dcc0', PAL.ink);
+    label(ctx, 'CIRCUIT BOARD — tap wires & sockets', 660, 116, F(13, true), PAL.woodDark, 'center');
+    const s = this.phase === 'build' ? this.solve() : this.sim;
+    // fixed return rail N2
+    ctx.save();
+    ctx.strokeStyle = PAL.steelDark; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(850, 170); ctx.lineTo(850, 400); ctx.lineTo(440, 400); ctx.lineTo(440, 380); ctx.stroke();
+    // battery feed: battery+ -> switch -> fuse -> N1
+    ctx.beginPath(); ctx.moveTo(440, 300); ctx.lineTo(440, 262); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(440, 205); ctx.lineTo(440, 140); ctx.lineTo(470, 140); ctx.stroke();
+    ctx.restore();
+    // wires
+    for (const id in S3_WIRES) {
+      const wd = S3_WIRES[id];
+      const on = this.wires[id];
+      ctx.save();
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      if (on) { ctx.strokeStyle = PAL.copper; ctx.lineWidth = 6; }
+      else { ctx.strokeStyle = 'rgba(58,44,35,0.35)'; ctx.lineWidth = 4; ctx.setLineDash([8, 8]); }
+      ctx.beginPath();
+      wd.pts.forEach((pt, i) => i === 0 ? ctx.moveTo(pt[0], pt[1]) : ctx.lineTo(pt[0], pt[1]));
+      ctx.stroke();
+      ctx.restore();
+      // current dots
+      if (on && s && Math.abs(s.wireI[id]) > 0.05 && this.phase !== 'build' && !this.fuseBlown && !this.shorted) {
+        const L = polyLen(wd.pts);
+        const speed = clamp(Math.abs(s.wireI[id]) * 22, 14, 120);
+        const spacing = 34;
+        const dir = s.wireI[id] > 0 ? 1 : -1;
+        ctx.fillStyle = PAL.brass;
+        for (let d = ((this.dotT * speed) % spacing); d < L; d += spacing) {
+          const [px, py] = polyPoint(wd.pts, dir > 0 ? d : L - d);
+          ctx.beginPath(); ctx.arc(px, py, 4.5, 0, TAU); ctx.fill();
+          ctx.lineWidth = 1.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        }
+      }
+    }
+    // w6 temptation label
+    if (!this.wires.w6) label(ctx, 'shortcut?', 792, 126, F(11), 'rgba(58,44,35,0.5)', 'center');
+    // battery
+    ctx.fillStyle = PAL.ink; ctx.fillRect(428, 296, 24, 8);
+    ctx.fillStyle = '#2f4858';
+    rr(ctx, 410, 300, 60, 82, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.fillStyle = PAL.brass;
+    rr(ctx, 410, 300, 60, 26, 8); ctx.fill(); ctx.stroke();
+    label(ctx, this.battSel.value + ' V', 440, 362, F(16, true), '#fff', 'center');
+    label(ctx, '+', 440, 320, F(18, true), PAL.ink, 'center');
+    // switch
+    ctx.save();
+    ctx.fillStyle = PAL.cream;
+    rr(ctx, 414, 208, 52, 52, 10); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.translate(440, 250);
+    ctx.fillStyle = PAL.ink;
+    ctx.beginPath(); ctx.arc(0, 0, 5, 0, TAU); ctx.fill();
+    ctx.rotate(this.switchOn ? 0 : 0.7);
+    ctx.strokeStyle = PAL.red; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -34); ctx.stroke();
+    ctx.restore();
+    label(ctx, this.switchOn ? 'ON' : 'OFF — tap!', 440, 278, F(11, true), this.switchOn ? PAL.greenDark : PAL.redDark, 'center');
+    // fuse
+    ctx.fillStyle = this.fuseBlown ? 'rgba(120,110,100,0.7)' : 'rgba(255,255,255,0.75)';
+    rr(ctx, 430, 165, 20, 38, 8); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.strokeStyle = this.fuseBlown ? PAL.redDark : PAL.copper; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    if (this.fuseBlown) { ctx.moveTo(440, 170); ctx.lineTo(436, 182); ctx.moveTo(444, 188); ctx.lineTo(440, 198); }
+    else { ctx.moveTo(440, 170); ctx.lineTo(440, 198); }
+    ctx.stroke();
+    label(ctx, 'fuse', 462, 188, F(11), PAL.woodDark);
+    // coil sockets
+    for (const which of ['a', 'b']) {
+      const r = this.coilRect(which);
+      const ohms = this.coils[which];
+      const cy = r.y + r.h / 2;
+      ctx.save();
+      ctx.fillStyle = '#dccfae';
+      rr(ctx, r.x, r.y, r.w, r.h, 10); ctx.fill();
+      ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.woodDark; ctx.setLineDash(ohms ? [] : [6, 5]); ctx.stroke();
+      ctx.restore();
+      if (ohms) {
+        const zags = ohms === 3 ? 4 : 7;
+        const powered = this.phase !== 'build' && s && !s.open && !s.short && !this.fuseBlown;
+        const pw = which === 'a' ? (s ? s.PA : 0) : (s ? s.PB : 0);
+        const glow = powered ? clamp(pw / 55, 0, 1) : 0;
+        ctx.save();
+        if (glow > 0.05) {
+          ctx.shadowColor = 'rgba(255,120,40,' + (0.5 + glow * 0.5) + ')';
+          ctx.shadowBlur = 8 + glow * 14;
+        }
+        ctx.strokeStyle = glow > 0.05 ? mixColor('#8a4b2c', '#ff6a2e', glow) : '#8a4b2c';
+        ctx.lineWidth = 5; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(r.x + 4, cy);
+        const innerW = r.w - 24;
+        for (let i = 0; i < zags; i++) {
+          const zx = r.x + 12 + innerW * (i + 0.5) / zags;
+          ctx.lineTo(zx, cy + (i % 2 ? 13 : -13));
+        }
+        ctx.lineTo(r.x + r.w - 4, cy);
+        ctx.stroke();
+        ctx.restore();
+        label(ctx, ohms + ' Ω', r.x + r.w / 2, r.y - 8, F(13, true), PAL.ink, 'center');
+      } else {
+        label(ctx, 'tap to add coil', r.x + r.w / 2, cy + 4, F(12), 'rgba(58,44,35,0.55)', 'center');
+      }
+      label(ctx, 'COIL ' + which.toUpperCase(), r.x + r.w / 2, r.y + r.h + 16, F(12, true), PAL.woodDark, 'center');
+    }
+    // node dots
+    ctx.fillStyle = PAL.ink;
+    for (const [nx, ny] of [[470,140],[692,170],[592,285],[850,170],[850,285]]) {
+      ctx.beginPath(); ctx.arc(nx, ny, 5, 0, TAU); ctx.fill();
+    }
+    // live readout
+    if (s && !s.open && this.switchOn) {
+      const shortTxt = s.short ? '⚠ R almost zero!' : '';
+      label(ctx, 'I = ' + fmt1(Math.min(99, s.I)) + ' A    R = ' + (s.Rext > 999 ? '∞' : fmt1(s.Rext)) + ' Ω    P = ' + Math.round(Math.min(999, s.P)) + ' W   ' + shortTxt,
+        660, 462, F(15, true), s.short || s.P > 70 ? PAL.redDark : PAL.ink, 'center');
+    } else {
+      label(ctx, 'I = 0 A — no current flowing', 660, 462, F(15, true), PAL.grey, 'center');
+    }
+    Particles.render(ctx);
+  }
+}
+STAGES.circuit = new Stage3Circuit(stageDef('circuit'));
 // __STAGE4__
 // __STAGE5__
 // fallback stubs for any stage not yet implemented
