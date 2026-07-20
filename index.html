@@ -1,0 +1,1288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>The Great Tea Machine</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#2e2620; overflow:hidden; }
+  #game { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; touch-action:none; user-select:none; -webkit-user-select:none; cursor:default; }
+</style>
+</head>
+<body>
+<div id="game"><canvas id="canvas"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   THE GREAT TEA MACHINE
+   Build it. Test it. Brew it.
+   A single-file engineering game: grind, lift, boil, brew, pour.
+   ============================================================ */
+
+// ===================== 1. CONSTANTS & PALETTE =====================
+const W = 960, H = 600, TAU = Math.PI * 2;
+const PAL = {
+  bg:      '#f7edd8',
+  bgDark:  '#ead9bb',
+  ink:     '#3a2c23',
+  wood:    '#b9855c',
+  woodDark:'#8f6240',
+  woodLite:'#d3a679',
+  copper:  '#c97b4a',
+  brass:   '#e8b64c',
+  brassLite:'#f4d488',
+  teal:    '#3fa8a0',
+  tealDark:'#2c7f79',
+  red:     '#e2574c',
+  redDark: '#b23c33',
+  green:   '#67b658',
+  greenDark:'#4a9440',
+  cream:   '#fff8e8',
+  sky:     '#d7ebe6',
+  amber:   '#c98a2e',
+  tea:     '#a9631f',
+  grey:    '#9a938a',
+  greyLite:'#cfc8bc',
+  steel:   '#8fa0ad',
+  steelDark:'#5f7280',
+  paper:   '#fdf6e3',
+  shadow:  'rgba(58,44,35,0.18)'
+};
+const FONT = '"Comic Sans MS","Chalkboard SE","Segoe Print","Comic Neue",cursive,sans-serif';
+function F(px, bold) { return (bold ? 'bold ' : '') + px + 'px ' + FONT; }
+
+const STAGE_DEFS = [
+  { id:'gears',    num:1, name:'Gear Grinder',   field:'Mechanical', concept:'Gear Ratios',
+    conceptText:'When a big gear turns a small gear, the small one spins faster but pushes with less force. Engineers pick gear ratios to trade force for speed — in bikes, cars, and tea grinders!' },
+  { id:'screw',    num:2, name:'Screw Lift',     field:'Mechanical', concept:'The Archimedes Screw',
+    conceptText:'An Archimedes screw is really a ramp wrapped around a pole. Each turn carries material one step uphill. Invented over 2,200 years ago — still used today to lift water, grain… and tea!' },
+  { id:'circuit',  num:3, name:'Boiler Circuit', field:'Electrical', concept:"Ohm's Law & Power",
+    conceptText:'Ohm’s law says current = voltage ÷ resistance (I = V÷R). Electrical power P = V×I turns into heat in the coils. Two coils in parallel means less resistance, so MORE current flows and MORE heat is made!' },
+  { id:'brew',     num:4, name:'Brew Lab',       field:'Chemical',   concept:'Diffusion',
+    conceptText:'Flavour molecules spread from where they are crowded (the leaves) to where they are not (the water) until they even out. That is diffusion — and it happens faster in hot water. Steeping tea is controlled diffusion!' },
+  { id:'assembly', num:5, name:'Grand Assembly', field:'Systems',    concept:'Systems Engineering',
+    conceptText:'Real machines are systems: mechanical, electrical and chemical parts all working together. If any one stage fails, the whole machine fails. You built every link in the chain — that is engineering!' },
+];
+const STAGE_ORDER = STAGE_DEFS.map(d => d.id);
+function stageDef(id){ return STAGE_DEFS.find(d => d.id === id); }
+
+// ===================== 2. UTILS =====================
+function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t){ return a + (b - a) * t; }
+function easeOut(t){ t = clamp(t, 0, 1); return 1 - (1 - t) * (1 - t); }
+function easeInOut(t){ t = clamp(t, 0, 1); return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; }
+function rand(a, b){ return a + Math.random() * (b - a); }
+function pick(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
+function fmt1(v){ return (Math.round(v * 10) / 10).toString(); }
+
+function rr(ctx, x, y, w, h, r){ // rounded rect path
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function panel(ctx, x, y, w, h, r, fill, stroke){
+  ctx.save();
+  ctx.fillStyle = PAL.shadow;
+  rr(ctx, x + 4, y + 6, w, h, r); ctx.fill();
+  ctx.fillStyle = fill || PAL.cream;
+  rr(ctx, x, y, w, h, r); ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = stroke || PAL.ink; ctx.stroke();
+  ctx.restore();
+}
+function textLines(ctx, text, maxW, font){
+  ctx.font = font;
+  const words = String(text).split(' ');
+  const lines = []; let cur = '';
+  for (const w of words) {
+    const t = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; }
+    else cur = t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function drawWrapped(ctx, text, x, y, maxW, lineH, font, color, align){
+  const lines = textLines(ctx, text, maxW, font);
+  ctx.font = font; ctx.fillStyle = color || PAL.ink;
+  ctx.textAlign = align || 'left'; ctx.textBaseline = 'top';
+  lines.forEach((ln, i) => ctx.fillText(ln, x, y + i * lineH));
+  return lines.length * lineH;
+}
+function label(ctx, text, x, y, font, color, align, baseline){
+  ctx.font = font; ctx.fillStyle = color || PAL.ink;
+  ctx.textAlign = align || 'left'; ctx.textBaseline = baseline || 'alphabetic';
+  ctx.fillText(text, x, y);
+}
+
+// ===================== 3. PARTICLES =====================
+const Particles = {
+  list: [],
+  clear(){ this.list.length = 0; },
+  spawn(preset, x, y, n, opts){
+    opts = opts || {};
+    for (let i = 0; i < n; i++) {
+      const p = { preset, x, y, t: 0, life: 1, size: 4, vx: 0, vy: 0, g: 0, color: PAL.ink, rot: rand(0, TAU), vr: rand(-3, 3) };
+      switch (preset) {
+        case 'crumb':
+          p.vx = rand(-40, 40); p.vy = rand(-30, 30); p.g = 320;
+          p.life = rand(0.5, 1.1); p.size = rand(2, 5); p.color = opts.color || '#5d4020'; break;
+        case 'leaf':
+          p.vx = rand(-60, 60); p.vy = rand(-160, -60); p.g = 300;
+          p.life = rand(0.6, 1.2); p.size = rand(4, 8); p.color = opts.color || '#4d7a35'; break;
+        case 'spark':
+          p.vx = rand(-220, 220); p.vy = rand(-220, 80); p.g = 500;
+          p.life = rand(0.2, 0.5); p.size = rand(2, 4); p.color = pick(['#ffd24a', '#ff9d2e', '#fff2b0']); break;
+        case 'bubble':
+          p.vx = rand(-8, 8); p.vy = rand(-70, -30); p.g = -20;
+          p.life = rand(0.4, 1.0); p.size = rand(2, 6); p.color = 'rgba(255,255,255,0.8)'; break;
+        case 'steam':
+          p.vx = rand(-12, 12); p.vy = rand(-60, -30); p.g = -14;
+          p.life = rand(0.8, 1.8); p.size = rand(6, 13); p.color = 'rgba(255,255,255,0.55)'; break;
+        case 'drop':
+          p.vx = rand(-20, 20); p.vy = rand(0, 60); p.g = 420;
+          p.life = rand(0.4, 0.9); p.size = rand(2, 4); p.color = opts.color || PAL.tea; break;
+        case 'confetti':
+          p.vx = rand(-160, 160); p.vy = rand(-320, -120); p.g = 340;
+          p.life = rand(1.2, 2.4); p.size = rand(4, 7);
+          p.color = pick([PAL.red, PAL.brass, PAL.teal, PAL.green, '#c977d6', PAL.copper]); break;
+        case 'puff':
+          p.vx = rand(-40, 40); p.vy = rand(-40, 10); p.g = -8;
+          p.life = rand(0.3, 0.7); p.size = rand(5, 10); p.color = 'rgba(190,180,165,0.7)'; break;
+      }
+      if (opts.vx !== undefined) p.vx += opts.vx;
+      if (opts.vy !== undefined) p.vy += opts.vy;
+      if (opts.color) p.color = opts.color;
+      if (opts.size) p.size = opts.size * rand(0.7, 1.3);
+      if (opts.life) p.life = opts.life * rand(0.7, 1.3);
+      if (this.list.length < 900) this.list.push(p);
+    }
+  },
+  update(dt){
+    const L = this.list;
+    for (let i = L.length - 1; i >= 0; i--) {
+      const p = L[i];
+      p.t += dt;
+      if (p.t >= p.life) { L.splice(i, 1); continue; }
+      p.vy += p.g * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
+    }
+  },
+  render(ctx){
+    for (const p of this.list) {
+      const a = 1 - p.t / p.life;
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.translate(p.x, p.y);
+      if (p.preset === 'bubble' || p.preset === 'steam' || p.preset === 'puff') {
+        ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.arc(0, 0, p.size * (p.preset === 'steam' ? (1 + p.t) : 1), 0, TAU); ctx.fill();
+      } else if (p.preset === 'spark') {
+        ctx.strokeStyle = p.color; ctx.lineWidth = 2;
+        ctx.rotate(Math.atan2(p.vy, p.vx));
+        ctx.beginPath(); ctx.moveTo(-p.size * 1.5, 0); ctx.lineTo(p.size * 1.5, 0); ctx.stroke();
+      } else if (p.preset === 'drop') {
+        ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.arc(0, 0, p.size, 0, TAU); ctx.fill();
+      } else {
+        ctx.rotate(p.rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * (p.preset === 'confetti' ? 0.6 : 1));
+      }
+      ctx.restore();
+    }
+  }
+};
+
+// ===================== 4. AUDIO (WebAudio synth, toggleable) =====================
+const SFX = {
+  ac: null, enabled: true,
+  ensure(){
+    if (!this.enabled) return null;
+    try {
+      if (!this.ac) this.ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ac.state === 'suspended') this.ac.resume();
+      return this.ac;
+    } catch (e) { return null; }
+  },
+  tone(freq, dur, type, vol, glideTo, when){
+    const ac = this.ensure(); if (!ac) return;
+    const t0 = ac.currentTime + (when || 0);
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, t0);
+    if (glideTo) o.frequency.exponentialRampToValueAtTime(glideTo, t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol || 0.15, t0 + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(ac.destination);
+    o.start(t0); o.stop(t0 + dur + 0.05);
+  },
+  noise(dur, vol, lowpass){
+    const ac = this.ensure(); if (!ac) return;
+    const t0 = ac.currentTime;
+    const len = Math.max(1, Math.floor(ac.sampleRate * dur));
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const g = ac.createGain(); g.gain.value = vol || 0.2;
+    const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = lowpass || 2000;
+    src.connect(f).connect(g).connect(ac.destination);
+    src.start(t0);
+  },
+  click(){ this.tone(600, 0.06, 'square', 0.05); },
+  thunk(){ this.tone(140, 0.1, 'triangle', 0.2); },
+  boing(){ this.tone(300, 0.35, 'sawtooth', 0.12, 90); },
+  pop(){ this.noise(0.12, 0.3, 1200); this.tone(220, 0.15, 'square', 0.12, 80); },
+  spark(){ this.noise(0.25, 0.35, 5000); },
+  bubble(){ this.tone(rand(500, 900), 0.08, 'sine', 0.06, 1200); },
+  whistle(){ this.tone(880, 1.1, 'sine', 0.1, 1500); },
+  ding(){ this.tone(1320, 0.4, 'sine', 0.12); },
+  success(){ [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.22, 'triangle', 0.12, null, i * 0.09)); },
+  fail(){ this.tone(330, 0.3, 'sawtooth', 0.1, 240); this.tone(240, 0.4, 'sawtooth', 0.09, 160, 0.18); },
+  fanfare(){ [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => this.tone(f, 0.25, 'triangle', 0.12, null, i * 0.12)); }
+};
+
+// ===================== 5. SAVE (localStorage) =====================
+const Save = {
+  key: 'greatTeaMachine.v1',
+  data: { unlocked: 1, done: {}, retries: {}, params: {}, sound: true, tea: null, brews: 0 },
+  load(){
+    try {
+      const raw = localStorage.getItem(this.key);
+      if (raw) Object.assign(this.data, JSON.parse(raw));
+    } catch (e) { /* file:// or private mode - play without saving */ }
+    SFX.enabled = this.data.sound !== false;
+  },
+  save(){
+    try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) {}
+  },
+  reset(){
+    this.data = { unlocked: 1, done: {}, retries: {}, params: {}, sound: SFX.enabled, tea: null, brews: 0 };
+    this.save();
+  },
+  stageIndex(id){ return STAGE_ORDER.indexOf(id) + 1; },
+  isUnlocked(id){ return this.stageIndex(id) <= this.data.unlocked; },
+  markDone(id, params){
+    this.data.done[id] = true;
+    if (params) this.data.params[id] = params;
+    this.data.unlocked = Math.max(this.data.unlocked, Math.min(this.stageIndex(id) + 1, STAGE_ORDER.length));
+    this.save();
+  },
+  addRetry(id){ this.data.retries[id] = (this.data.retries[id] || 0) + 1; this.save(); },
+  totalRetries(){ return Object.values(this.data.retries).reduce((a, b) => a + b, 0); }
+};
+
+// ===================== 6. UI KIT =====================
+class Button {
+  constructor(o){
+    Object.assign(this, { x:0, y:0, w:160, h:52, text:'OK', style:'primary', visible:true,
+      disabled:false, fontSize:20, onClick:null, icon:null }, o);
+    this.pressT = 0;
+  }
+  contains(p){ return p.x >= this.x && p.x <= this.x + this.w && p.y >= this.y && p.y <= this.y + this.h; }
+  down(p){
+    if (!this.visible || this.disabled || !this.contains(p)) return false;
+    this.pressT = 0.18; SFX.click();
+    if (this.onClick) this.onClick();
+    return true;
+  }
+  move(){ return false; }
+  up(){ return false; }
+  update(dt){ if (this.pressT > 0) this.pressT -= dt; }
+  render(ctx){
+    if (!this.visible) return;
+    const colors = {
+      primary: [PAL.teal, PAL.tealDark],
+      go:      [PAL.green, PAL.greenDark],
+      danger:  [PAL.red, PAL.redDark],
+      plain:   [PAL.cream, PAL.woodDark],
+      brass:   [PAL.brass, PAL.amber],
+    }[this.style] || [PAL.teal, PAL.tealDark];
+    const off = this.pressT > 0 ? 3 : 0;
+    ctx.save();
+    ctx.translate(this.x, this.y + off);
+    if (this.disabled) ctx.globalAlpha = 0.45;
+    ctx.fillStyle = 'rgba(58,44,35,0.3)';
+    rr(ctx, 2, 5 - off, this.w, this.h, 14); ctx.fill();
+    ctx.fillStyle = colors[0];
+    rr(ctx, 0, 0, this.w, this.h, 14); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // shine
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(12, 8); ctx.lineTo(this.w - 12, 8); ctx.stroke();
+    ctx.fillStyle = this.style === 'plain' ? PAL.ink : '#fff';
+    ctx.font = F(this.fontSize, true);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(this.text, this.w / 2, this.h / 2 + 2);
+    ctx.restore();
+  }
+}
+class Slider {
+  constructor(o){
+    Object.assign(this, { x:0, y:0, w:200, label:'', min:0, max:10, step:1, value:5,
+      format: v => String(v), onChange:null, disabled:false, visible:true }, o);
+    this.drag = false;
+  }
+  get knobX(){ return this.x + (this.value - this.min) / (this.max - this.min) * this.w; }
+  setFromX(px){
+    let t = clamp((px - this.x) / this.w, 0, 1);
+    let v = this.min + t * (this.max - this.min);
+    v = Math.round(v / this.step) * this.step;
+    v = clamp(v, this.min, this.max);
+    if (v !== this.value) { this.value = v; if (this.onChange) this.onChange(v); }
+  }
+  down(p){
+    if (!this.visible || this.disabled) return false;
+    if (p.x >= this.x - 16 && p.x <= this.x + this.w + 16 && p.y >= this.y - 20 && p.y <= this.y + 22) {
+      this.drag = true; this.setFromX(p.x); SFX.click(); return true;
+    }
+    return false;
+  }
+  move(p){ if (this.drag) { this.setFromX(p.x); return true; } return false; }
+  up(){ const was = this.drag; this.drag = false; return was; }
+  update(){}
+  render(ctx){
+    if (!this.visible) return;
+    ctx.save();
+    if (this.disabled) ctx.globalAlpha = 0.5;
+    label(ctx, this.label + '  ' + this.format(this.value), this.x, this.y - 14, F(15, true), PAL.ink);
+    // track
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = PAL.ink; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(this.x, this.y); ctx.lineTo(this.x + this.w, this.y); ctx.stroke();
+    ctx.strokeStyle = PAL.greyLite; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(this.x, this.y); ctx.lineTo(this.x + this.w, this.y); ctx.stroke();
+    ctx.strokeStyle = PAL.teal; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(this.x, this.y); ctx.lineTo(this.knobX, this.y); ctx.stroke();
+    // knob
+    ctx.fillStyle = PAL.brass;
+    ctx.beginPath(); ctx.arc(this.knobX, this.y, 12, 0, TAU); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath(); ctx.arc(this.knobX - 3, this.y - 3, 3.5, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+}
+class Selector {
+  constructor(o){
+    Object.assign(this, { x:0, y:0, w:220, h:40, label:'', options:[], index:0,
+      onChange:null, disabled:false, visible:true }, o);
+  }
+  get value(){ return this.options[this.index].value; }
+  down(p){
+    if (!this.visible || this.disabled) return false;
+    if (p.y < this.y || p.y > this.y + this.h || p.x < this.x || p.x > this.x + this.w) return false;
+    const seg = this.w / this.options.length;
+    const i = clamp(Math.floor((p.x - this.x) / seg), 0, this.options.length - 1);
+    if (i !== this.index) { this.index = i; SFX.click(); if (this.onChange) this.onChange(this.value); }
+    return true;
+  }
+  move(){ return false; } up(){ return false; } update(){}
+  render(ctx){
+    if (!this.visible) return;
+    ctx.save();
+    if (this.disabled) ctx.globalAlpha = 0.5;
+    if (this.label) label(ctx, this.label, this.x, this.y - 10, F(15, true), PAL.ink);
+    const seg = this.w / this.options.length;
+    ctx.fillStyle = PAL.cream; rr(ctx, this.x, this.y, this.w, this.h, 10); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    this.options.forEach((op, i) => {
+      const sx = this.x + i * seg;
+      if (i === this.index) {
+        ctx.fillStyle = PAL.teal;
+        rr(ctx, sx + 3, this.y + 3, seg - 6, this.h - 6, 8); ctx.fill();
+      }
+      label(ctx, op.label, sx + seg / 2, this.y + this.h / 2 + 1, F(15, true),
+        i === this.index ? '#fff' : PAL.ink, 'center', 'middle');
+    });
+    ctx.restore();
+  }
+}
+class Gauge {
+  constructor(o){
+    Object.assign(this, { x:0, y:0, r:52, min:0, max:100, value:0, label:'', unit:'',
+      bands:[], visible:true }, o);
+    this.shown = this.min;
+  }
+  angleFor(v){
+    const t = clamp((v - this.min) / (this.max - this.min), 0, 1);
+    return Math.PI * (1 + t); // sweep left (PI) to right (2PI)
+  }
+  down(){ return false; } move(){ return false; } up(){ return false; }
+  update(dt){ this.shown += (this.value - this.shown) * Math.min(1, dt * 6); }
+  render(ctx){
+    if (!this.visible) return;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.fillStyle = PAL.cream;
+    ctx.beginPath(); ctx.arc(0, 0, this.r + 10, Math.PI, 0); ctx.lineTo(this.r + 10, 12); ctx.lineTo(-this.r - 10, 12); ctx.closePath();
+    ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    for (const b of this.bands) {
+      ctx.strokeStyle = b.color; ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.arc(0, 0, this.r - 2, this.angleFor(b.from), this.angleFor(b.to)); ctx.stroke();
+    }
+    ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2;
+    for (let i = 0; i <= 4; i++) {
+      const a = Math.PI * (1 + i / 4);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * (this.r - 9), Math.sin(a) * (this.r - 9));
+      ctx.lineTo(Math.cos(a) * (this.r + 3), Math.sin(a) * (this.r + 3));
+      ctx.stroke();
+    }
+    const a = this.angleFor(this.shown);
+    ctx.strokeStyle = PAL.red; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * (this.r - 12), Math.sin(a) * (this.r - 12)); ctx.stroke();
+    ctx.fillStyle = PAL.ink;
+    ctx.beginPath(); ctx.arc(0, 0, 5, 0, TAU); ctx.fill();
+    label(ctx, Math.round(this.shown) + (this.unit ? ' ' + this.unit : ''), 0, -this.r - 16, F(14, true), PAL.ink, 'center');
+    label(ctx, this.label, 0, 26, F(14, true), PAL.ink, 'center');
+    ctx.restore();
+  }
+}
+class Meter {
+  constructor(o){
+    Object.assign(this, { x:0, y:0, w:34, h:150, value:0, label:'', color:PAL.teal,
+      band:null, max:1, visible:true, format:null }, o);
+    this.shown = 0;
+  }
+  down(){ return false; } move(){ return false; } up(){ return false; }
+  update(dt){ this.shown += (this.value - this.shown) * Math.min(1, dt * 6); }
+  render(ctx){
+    if (!this.visible) return;
+    ctx.save();
+    ctx.fillStyle = PAL.cream;
+    rr(ctx, this.x, this.y, this.w, this.h, 8); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    if (this.band) {
+      const y1 = this.y + this.h * (1 - this.band[1] / this.max);
+      const y2 = this.y + this.h * (1 - this.band[0] / this.max);
+      ctx.fillStyle = 'rgba(103,182,88,0.35)';
+      ctx.fillRect(this.x + 2, y1, this.w - 4, y2 - y1);
+      ctx.strokeStyle = PAL.greenDark; ctx.lineWidth = 2;
+      ctx.strokeRect(this.x + 2, y1, this.w - 4, y2 - y1);
+    }
+    const t = clamp(this.shown / this.max, 0, 1);
+    const fh = (this.h - 6) * t;
+    if (fh > 1) {
+      ctx.fillStyle = this.color;
+      rr(ctx, this.x + 3, this.y + this.h - 3 - fh, this.w - 6, fh, 5); ctx.fill();
+    }
+    const txt = this.format ? this.format(this.shown) : '';
+    if (txt) label(ctx, txt, this.x + this.w / 2, this.y - 8, F(13, true), PAL.ink, 'center');
+    drawWrapped(ctx, this.label, this.x + this.w / 2, this.y + this.h + 8, 90, 15, F(13, true), PAL.ink, 'center');
+    ctx.restore();
+  }
+}
+class UIGroup {
+  constructor(items){ this.items = items || []; }
+  add(item){ this.items.push(item); return item; }
+  down(p){ for (let i = this.items.length - 1; i >= 0; i--) if (this.items[i].down && this.items[i].down(p)) return true; return false; }
+  move(p){ let h = false; for (const it of this.items) if (it.move && it.move(p)) h = true; return h; }
+  up(p){ let h = false; for (const it of this.items) if (it.up && it.up(p)) h = true; return h; }
+  update(dt){ for (const it of this.items) if (it.update) it.update(dt); }
+  render(ctx){ for (const it of this.items) if (it.render) it.render(ctx); }
+  setDisabled(d){ for (const it of this.items) it.disabled = d; }
+}
+
+// ===================== 7. DRAWING HELPERS =====================
+const gearPathCache = {};
+function gearPath(teeth, r){
+  const key = teeth + '_' + Math.round(r);
+  if (gearPathCache[key]) return gearPathCache[key];
+  const p = new Path2D();
+  const outer = r + Math.max(5, r * 0.16), inner = r;
+  const s = TAU / teeth;
+  for (let i = 0; i < teeth; i++) {
+    const a = i * s;
+    const pts = [
+      [inner, a], [outer, a + s * 0.14], [outer, a + s * 0.42], [inner, a + s * 0.56]
+    ];
+    for (const [rad, ang] of pts) {
+      const x = Math.cos(ang) * rad, y = Math.sin(ang) * rad;
+      if (i === 0 && rad === inner && ang === a) p.moveTo(x, y); else p.lineTo(x, y);
+    }
+  }
+  p.closePath();
+  gearPathCache[key] = p;
+  return p;
+}
+function drawGear(ctx, x, y, teeth, r, angle, color, opts){
+  opts = opts || {};
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(angle);
+  const path = gearPath(teeth, r);
+  ctx.fillStyle = color;
+  ctx.fill(path);
+  ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke(path);
+  // hub
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.62, 0, TAU); ctx.fill();
+  ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.62, 0, TAU); ctx.stroke();
+  // spokes
+  const spokes = Math.max(3, Math.min(6, Math.round(teeth / 6)));
+  for (let i = 0; i < spokes; i++) {
+    const a = i / spokes * TAU;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a) * 8, Math.sin(a) * 8);
+    ctx.lineTo(Math.cos(a) * r * 0.6, Math.sin(a) * r * 0.6); ctx.stroke();
+  }
+  ctx.fillStyle = opts.hub || PAL.ink;
+  ctx.beginPath(); ctx.arc(0, 0, 7, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function drawWoodPanel(ctx, x, y, w, h){
+  ctx.save();
+  panel(ctx, x, y, w, h, 12, PAL.wood, PAL.ink);
+  ctx.strokeStyle = 'rgba(58,44,35,0.22)'; ctx.lineWidth = 2;
+  for (let i = 1; i <= 3; i++) {
+    const yy = y + h * i / 4;
+    ctx.beginPath(); ctx.moveTo(x + 8, yy); ctx.lineTo(x + w - 8, yy); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawKettle(ctx, x, y, s, opts){ // x,y = base center; s = scale (1 = ~110px tall)
+  opts = opts || {};
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = opts.color || PAL.steel;
+  ctx.beginPath();
+  ctx.moveTo(-52, 0);
+  ctx.bezierCurveTo(-58, -66, -30, -88, 0, -88);
+  ctx.bezierCurveTo(30, -88, 58, -66, 52, 0);
+  ctx.closePath(); ctx.fill();
+  ctx.lineWidth = 3.4; ctx.strokeStyle = PAL.ink; ctx.stroke();
+  // spout
+  ctx.beginPath();
+  ctx.moveTo(-48, -38);
+  ctx.quadraticCurveTo(-84, -46, -80, -74);
+  ctx.lineTo(-64, -70);
+  ctx.quadraticCurveTo(-64, -52, -42, -52);
+  ctx.closePath();
+  ctx.fillStyle = opts.color || PAL.steel; ctx.fill(); ctx.stroke();
+  // lid
+  ctx.fillStyle = opts.lid || PAL.steelDark;
+  ctx.beginPath(); ctx.ellipse(0, -88, 26, 9, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, -96, 6, 0, TAU); ctx.fillStyle = PAL.brass; ctx.fill(); ctx.stroke();
+  // handle
+  ctx.beginPath();
+  ctx.moveTo(-24, -92); ctx.quadraticCurveTo(0, -122, 24, -92);
+  ctx.lineWidth = 7; ctx.strokeStyle = PAL.ink; ctx.stroke();
+  ctx.lineWidth = 3.5; ctx.strokeStyle = PAL.woodDark;
+  ctx.beginPath(); ctx.moveTo(-22, -93); ctx.quadraticCurveTo(0, -119, 22, -93); ctx.stroke();
+  // shine
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-32, -64); ctx.quadraticCurveTo(-38, -40, -34, -22); ctx.stroke();
+  ctx.restore();
+}
+function drawCup(ctx, x, y, s, fillLevel, teaColor, milkiness){ // base center
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(s, s);
+  // saucer
+  ctx.fillStyle = PAL.cream;
+  ctx.beginPath(); ctx.ellipse(0, 2, 52, 10, 0, 0, TAU); ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+  // cup body
+  ctx.beginPath();
+  ctx.moveTo(-34, -52);
+  ctx.bezierCurveTo(-34, -10, -22, -2, 0, -2);
+  ctx.bezierCurveTo(22, -2, 34, -10, 34, -52);
+  ctx.closePath();
+  ctx.fillStyle = PAL.cream; ctx.fill(); ctx.stroke();
+  // handle
+  ctx.beginPath();
+  ctx.moveTo(34, -44); ctx.bezierCurveTo(56, -46, 56, -18, 32, -18);
+  ctx.lineWidth = 6; ctx.strokeStyle = PAL.ink; ctx.stroke();
+  // tea
+  if (fillLevel > 0.02) {
+    const lv = clamp(fillLevel, 0, 1);
+    const topY = lerp(-8, -48, lv);
+    let col = teaColor || PAL.tea;
+    if (milkiness) {
+      col = mixColor(col, '#e8d7b8', clamp(milkiness, 0, 1) * 0.75);
+    }
+    ctx.beginPath();
+    const halfW = lerp(24, 33, lv);
+    ctx.ellipse(0, topY, halfW, 6, 0, 0, TAU);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(58,44,35,0.5)'; ctx.stroke();
+  }
+  // rim
+  ctx.beginPath(); ctx.ellipse(0, -52, 34, 7, 0, 0, TAU);
+  ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+  ctx.restore();
+}
+function mixColor(c1, c2, t){
+  const p = c => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
+  const a = p(c1), b = p(c2);
+  const m = a.map((v, i) => Math.round(lerp(v, b[i], t)));
+  return 'rgb(' + m.join(',') + ')';
+}
+// Professor Pekoe. poses: idle, happy, sad, think, cheer, shock
+function drawPekoe(ctx, x, y, s, pose, t){
+  pose = pose || 'idle'; t = t || 0;
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(s, s);
+  const bob = Math.sin(t * 2.2) * 2;
+  ctx.translate(0, bob);
+  if (pose === 'cheer') ctx.rotate(Math.sin(t * 8) * 0.05);
+  // face
+  ctx.fillStyle = '#f6d7b2';
+  ctx.beginPath(); ctx.arc(0, 0, 30, 0, TAU); ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+  // hard hat
+  ctx.fillStyle = PAL.teal;
+  ctx.beginPath(); ctx.arc(0, -12, 26, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = PAL.teal;
+  rr(ctx, -32, -16, 64, 8, 4); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = PAL.brass;
+  rr(ctx, -6, -36, 12, 12, 3); ctx.fill(); ctx.stroke();
+  // cheeks
+  ctx.fillStyle = 'rgba(226,87,76,0.35)';
+  ctx.beginPath(); ctx.arc(-17, 8, 5, 0, TAU); ctx.arc(17, 8, 5, 0, TAU); ctx.fill();
+  // eyes
+  ctx.fillStyle = PAL.ink;
+  if (pose === 'happy' || pose === 'cheer') {
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink;
+    ctx.beginPath(); ctx.arc(-10, 0, 5, Math.PI, 0); ctx.stroke();
+    ctx.beginPath(); ctx.arc(10, 0, 5, Math.PI, 0); ctx.stroke();
+  } else if (pose === 'sad') {
+    ctx.beginPath(); ctx.arc(-10, 2, 3, 0, TAU); ctx.arc(10, 2, 3, 0, TAU); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink;
+    ctx.beginPath(); ctx.moveTo(-16, -7); ctx.lineTo(-5, -3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(16, -7); ctx.lineTo(5, -3); ctx.stroke();
+  } else if (pose === 'shock') {
+    ctx.beginPath(); ctx.arc(-10, 0, 6, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(10, 0, 6, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-10, 0, 2.5, 0, TAU); ctx.arc(10, 0, 2.5, 0, TAU); ctx.fill();
+  } else if (pose === 'think') {
+    ctx.beginPath(); ctx.arc(-10, 0, 3, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(10, -2, 3, 0, TAU); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink;
+    ctx.beginPath(); ctx.moveTo(4, -9); ctx.lineTo(16, -12); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(-10, 0, 3.5, 0, TAU); ctx.arc(10, 0, 3.5, 0, TAU); ctx.fill();
+  }
+  // glasses
+  ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink;
+  ctx.beginPath(); ctx.arc(-10, 0, 9, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(10, 0, 9, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-1, 0); ctx.lineTo(1, 0); ctx.stroke();
+  // moustache
+  ctx.fillStyle = '#f2f2ee';
+  ctx.beginPath();
+  ctx.arc(-9, 14, 9, 0, TAU);
+  ctx.arc(9, 14, 9, 0, TAU);
+  ctx.fill();
+  ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink;
+  ctx.beginPath(); ctx.arc(-9, 14, 9, 0.3, Math.PI * 1.25); ctx.stroke();
+  ctx.beginPath(); ctx.arc(9, 14, 9, Math.PI * 1.75, Math.PI - 0.3); ctx.stroke();
+  // mouth
+  if (pose === 'cheer' || pose === 'happy') {
+    ctx.fillStyle = '#8c3b30';
+    ctx.beginPath(); ctx.arc(0, 20, 6, 0, Math.PI); ctx.closePath(); ctx.fill();
+  } else if (pose === 'sad') {
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(0, 26, 5, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+  } else if (pose === 'shock') {
+    ctx.fillStyle = '#8c3b30';
+    ctx.beginPath(); ctx.ellipse(0, 22, 4, 5, 0, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ===================== 8. MENTOR =====================
+const Mentor = {
+  text: '', pose: 'idle', t: 0, popT: 0,
+  say(text, pose){
+    if (text === this.text) return;
+    this.text = text; this.pose = pose || 'idle'; this.popT = 0.25;
+  },
+  clear(){ this.text = ''; },
+  update(dt){ this.t += dt; if (this.popT > 0) this.popT -= dt; },
+  render(ctx){
+    if (!this.text) return;
+    const bx = 118, bw = 560, by = H - 108, bh = 96;
+    ctx.save();
+    const pop = 1 + easeOut(this.popT / 0.25) * 0.04;
+    // bubble
+    ctx.translate(bx + bw / 2, by + bh / 2); ctx.scale(pop, pop); ctx.translate(-(bx + bw / 2), -(by + bh / 2));
+    ctx.fillStyle = PAL.shadow; rr(ctx, bx + 3, by + 5, bw, bh, 16); ctx.fill();
+    ctx.fillStyle = PAL.paper; rr(ctx, bx, by, bw, bh, 16); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // tail
+    ctx.fillStyle = PAL.paper;
+    ctx.beginPath(); ctx.moveTo(bx + 2, by + 40); ctx.lineTo(bx - 16, by + 52); ctx.lineTo(bx + 2, by + 62); ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = PAL.ink; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(bx + 2, by + 40); ctx.lineTo(bx - 16, by + 52); ctx.lineTo(bx + 2, by + 62); ctx.stroke();
+    label(ctx, 'PROF. PEKOE', bx + 16, by + 20, F(12, true), PAL.tealDark);
+    drawWrapped(ctx, this.text, bx + 16, by + 30, bw - 32, 20, F(15), PAL.ink);
+    ctx.restore();
+    drawPekoe(ctx, 62, H - 56, 1.15, this.pose, this.t);
+  }
+};
+
+// ===================== 9. GAME SHELL =====================
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const view = { scale: 1, px: 1 };
+function resize(){
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.style.width = (W * s) + 'px';
+  canvas.style.height = (H * s) + 'px';
+  canvas.width = Math.round(W * s * dpr);
+  canvas.height = Math.round(H * s * dpr);
+  view.scale = s; view.px = s * dpr;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const Game = {
+  screen: null, time: 0,
+  goto(screen, params){
+    if (this.screen && this.screen.exit) this.screen.exit();
+    Particles.clear();
+    Mentor.clear();
+    this.screen = screen;
+    if (screen.enter) screen.enter(params || {});
+  }
+};
+// global HUD: sound toggle (drawn on every screen, top-right corner)
+const soundBtn = {
+  x: W - 46, y: 10, w: 36, h: 36,
+  down(p){
+    if (p.x >= this.x && p.x <= this.x + this.w && p.y >= this.y && p.y <= this.y + this.h) {
+      SFX.enabled = !SFX.enabled;
+      Save.data.sound = SFX.enabled; Save.save();
+      if (SFX.enabled) SFX.click();
+      return true;
+    }
+    return false;
+  },
+  render(ctx){
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = PAL.cream; rr(ctx, this.x, this.y, this.w, this.h, 10); ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    // speaker
+    ctx.fillStyle = PAL.ink;
+    ctx.beginPath();
+    ctx.moveTo(this.x + 8, this.y + 14); ctx.lineTo(this.x + 14, this.y + 14);
+    ctx.lineTo(this.x + 20, this.y + 8); ctx.lineTo(this.x + 20, this.y + 28);
+    ctx.lineTo(this.x + 14, this.y + 22); ctx.lineTo(this.x + 8, this.y + 22);
+    ctx.closePath(); ctx.fill();
+    if (SFX.enabled) {
+      ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(this.x + 21, this.y + 18, 6, -0.9, 0.9); ctx.stroke();
+      ctx.beginPath(); ctx.arc(this.x + 21, this.y + 18, 10, -0.8, 0.8); ctx.stroke();
+    } else {
+      ctx.strokeStyle = PAL.red; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(this.x + 24, this.y + 12); ctx.lineTo(this.x + 32, this.y + 24); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(this.x + 32, this.y + 12); ctx.lineTo(this.x + 24, this.y + 24); ctx.stroke();
+    }
+    ctx.restore();
+  }
+};
+
+function pointerPos(e){
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / view.scale, y: (e.clientY - r.top) / view.scale };
+}
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  const p = pointerPos(e);
+  if (soundBtn.down(p)) return;
+  if (Game.screen && Game.screen.onPointerDown) Game.screen.onPointerDown(p);
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointerPos(e);
+  if (Game.screen && Game.screen.onPointerMove) Game.screen.onPointerMove(p);
+});
+canvas.addEventListener('pointerup', e => {
+  const p = pointerPos(e);
+  if (Game.screen && Game.screen.onPointerUp) Game.screen.onPointerUp(p);
+});
+window.addEventListener('keydown', e => {
+  if (Game.screen && Game.screen.onKey) Game.screen.onKey(e.key);
+});
+
+let tPrev = performance.now();
+function frame(tNow){
+  const dt = Math.min((tNow - tPrev) / 1000, 1 / 20);
+  tPrev = tNow;
+  Game.time += dt;
+  if (Game.screen) {
+    if (Game.screen.update) Game.screen.update(dt);
+    Particles.update(dt);
+    Mentor.update(dt);
+    ctx.setTransform(view.px, 0, 0, view.px, 0, 0);
+    ctx.fillStyle = PAL.bg;
+    ctx.fillRect(0, 0, W, H);
+    if (Game.screen.render) Game.screen.render(ctx);
+    soundBtn.render(ctx);
+  }
+  requestAnimationFrame(frame);
+}
+
+// workshop backdrop shared by several screens
+function drawBackdrop(ctx){
+  ctx.fillStyle = PAL.bg; ctx.fillRect(0, 0, W, H);
+  // wall planks
+  ctx.strokeStyle = 'rgba(58,44,35,0.06)'; ctx.lineWidth = 2;
+  for (let x = 0; x < W; x += 96) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  // floor
+  ctx.fillStyle = PAL.bgDark;
+  ctx.fillRect(0, H - 90, W, 90);
+  ctx.strokeStyle = 'rgba(58,44,35,0.15)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(0, H - 90); ctx.lineTo(W, H - 90); ctx.stroke();
+}
+
+// ===================== 10. STAGE BASE =====================
+class StageBase {
+  constructor(def){
+    this.def = def;
+    this.phase = 'build'; // build | running | result
+  }
+  enter(){
+    this.phase = 'build';
+    this.runT = 0;
+    this.result = null;
+    this.t = 0;
+    this.ui = new UIGroup();
+    this.backBtn = new Button({ x: 14, y: 10, w: 88, h: 38, text: '← Map', style: 'plain', fontSize: 15,
+      onClick: () => Game.goto(MapScreen) });
+    this.runBtn = new Button({ x: W - 190, y: H - 76, w: 170, h: 58, text: 'RUN ▶', style: 'go', fontSize: 24,
+      onClick: () => this.pressRun() });
+    this.tweakBtn = new Button({ x: W / 2 - 200, y: 0, w: 180, h: 52, text: '↺ Tweak it', style: 'primary',
+      onClick: () => this.backToBuild() });
+    this.nextBtn = new Button({ x: W / 2 + 20, y: 0, w: 180, h: 52, text: 'Continue →', style: 'go',
+      onClick: () => this.continueAfterWin() });
+    this.setup();
+    this.sayIntro();
+  }
+  setup(){} // override: build stage UI/state
+  sayIntro(){}
+  pressRun(){
+    if (this.phase !== 'build') return;
+    this.phase = 'running';
+    this.runT = 0;
+    this.ui.setDisabled(true);
+    this.startRun();
+  }
+  startRun(){}
+  updateRun(dt){}
+  backToBuild(){
+    this.phase = 'build';
+    this.result = null;
+    this.ui.setDisabled(false);
+    Particles.clear();
+    this.onBackToBuild();
+  }
+  onBackToBuild(){}
+  finish(win, title, line, pose){
+    if (this.phase === 'result') return;
+    this.phase = 'result';
+    this.result = { win, title, line };
+    if (win) {
+      SFX.success();
+      Save.markDone(this.def.id, this.winParams ? this.winParams() : null);
+      Mentor.say(line, pose || 'cheer');
+    } else {
+      SFX.fail();
+      Save.addRetry(this.def.id);
+      Mentor.say(line, pose || 'sad');
+    }
+  }
+  winParams(){ return null; }
+  continueAfterWin(){
+    Game.goto(ConceptScreen, { def: this.def });
+  }
+  update(dt){
+    this.t += dt;
+    this.ui.update(dt);
+    this.runBtn.update(dt); this.backBtn.update(dt);
+    this.tweakBtn.update(dt); this.nextBtn.update(dt);
+    if (this.phase === 'running') {
+      this.runT += dt;
+      this.updateRun(dt);
+    }
+    this.updateAlways(dt);
+  }
+  updateAlways(dt){}
+  render(ctx){
+    drawBackdrop(ctx);
+    this.renderWorld(ctx);
+    this.ui.render(ctx);
+    // header
+    ctx.save();
+    label(ctx, 'STAGE ' + this.def.num + ' · ' + this.def.field.toUpperCase(), W / 2, 24, F(13, true), PAL.tealDark, 'center');
+    label(ctx, this.def.name, W / 2, 48, F(26, true), PAL.ink, 'center');
+    ctx.restore();
+    this.backBtn.render(ctx);
+    if (this.phase === 'build') this.runBtn.render(ctx);
+    Mentor.render(ctx);
+    if (this.phase === 'result') this.renderResult(ctx);
+  }
+  renderWorld(ctx){}
+  renderResult(ctx){
+    const r = this.result;
+    const pw = 480, ph = 150, px = W / 2 - pw / 2, py = 120;
+    ctx.save();
+    panel(ctx, px, py, pw, ph, 18, r.win ? '#eaf6df' : '#fbe9e4', r.win ? PAL.greenDark : PAL.redDark);
+    label(ctx, r.title, W / 2, py + 44, F(30, true), r.win ? PAL.greenDark : PAL.redDark, 'center');
+    drawWrapped(ctx, r.line, W / 2, py + 66, pw - 60, 20, F(15), PAL.ink, 'center');
+    ctx.restore();
+    this.tweakBtn.y = py + ph - 8; this.nextBtn.y = py + ph - 8;
+    if (r.win) {
+      this.tweakBtn.render(ctx);
+      this.nextBtn.render(ctx);
+    } else {
+      this.tweakBtn.x = W / 2 - 90; this.tweakBtn.render(ctx); this.tweakBtn.x = W / 2 - 200;
+    }
+  }
+  onPointerDown(p){
+    if (this.phase === 'result') {
+      if (this.result.win) { if (this.nextBtn.down(p)) return; }
+      const saveX = this.tweakBtn.x;
+      if (!this.result.win) this.tweakBtn.x = W / 2 - 90;
+      const hit = this.tweakBtn.down(p);
+      this.tweakBtn.x = saveX;
+      if (hit) return;
+      return;
+    }
+    if (this.backBtn.down(p)) return;
+    if (this.phase === 'build') {
+      if (this.runBtn.down(p)) return;
+      if (this.ui.down(p)) return;
+      this.worldDown(p);
+    }
+  }
+  onPointerMove(p){ if (this.phase === 'build') { if (!this.ui.move(p)) this.worldMove(p); } }
+  onPointerUp(p){ if (this.phase === 'build') { this.ui.up(p); this.worldUp(p); } }
+  worldDown(p){} worldMove(p){} worldUp(p){}
+  onKey(k){
+    if (k === 'Escape') Game.goto(MapScreen);
+    if (k === 'Enter') {
+      if (this.phase === 'build') this.pressRun();
+      else if (this.phase === 'result' && this.result.win) this.continueAfterWin();
+      else if (this.phase === 'result') this.backToBuild();
+    }
+  }
+  exit(){}
+}
+
+// ===================== 11. TITLE SCREEN =====================
+const TitleScreen = {
+  enter(){
+    this.t = 0;
+    this.confirmReset = false;
+    this.startBtn = new Button({ x: W / 2 - 110, y: 400, w: 220, h: 64, text: 'START', style: 'go', fontSize: 28,
+      onClick: () => Game.goto(MapScreen) });
+    this.resetBtn = new Button({ x: W / 2 - 110, y: 546, w: 220, h: 36, text: 'Reset progress', style: 'plain', fontSize: 14,
+      onClick: () => {
+        if (this.confirmReset) { Save.reset(); this.confirmReset = false; this.resetBtn.text = 'Reset progress'; }
+        else { this.confirmReset = true; this.resetBtn.text = 'Really erase? Tap again'; }
+      } });
+  },
+  update(dt){
+    this.t += dt;
+    this.startBtn.update(dt); this.resetBtn.update(dt);
+    if (Math.random() < dt * 4) Particles.spawn('steam', W / 2 - 74 + rand(-6, 6), 232, 1);
+  },
+  render(ctx){
+    drawBackdrop(ctx);
+    // sun window
+    ctx.fillStyle = PAL.sky;
+    ctx.beginPath(); ctx.arc(W / 2, 210, 150, 0, TAU); ctx.fill();
+    ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink; ctx.stroke();
+    Particles.render(ctx);
+    drawKettle(ctx, W / 2, 300, 1.35, { color: PAL.copper, lid: PAL.woodDark });
+    // gears decorating
+    drawGear(ctx, 130, 130, 16, 44, this.t * 0.8, PAL.brass);
+    drawGear(ctx, 208, 172, 10, 27, -this.t * 1.28, PAL.copper);
+    drawGear(ctx, W - 130, 140, 20, 54, -this.t * 0.6, PAL.teal);
+    // title
+    ctx.save();
+    ctx.translate(W / 2, 82);
+    ctx.rotate(-0.02);
+    label(ctx, 'THE GREAT', 0, -18, F(28, true), PAL.tealDark, 'center');
+    ctx.font = F(58, true); ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.lineWidth = 8; ctx.strokeStyle = PAL.ink; ctx.strokeText('TEA MACHINE', 0, 40);
+    ctx.fillStyle = PAL.brass; ctx.fillText('TEA MACHINE', 0, 40);
+    ctx.restore();
+    label(ctx, 'Build it. Test it. Brew it.', W / 2, 480, F(19, true), PAL.woodDark, 'center');
+    label(ctx, 'Use mechanical, electrical & chemical engineering to make the perfect cup of tea!', W / 2, 508, F(15), PAL.ink, 'center');
+    this.startBtn.render(ctx);
+    this.resetBtn.render(ctx);
+    drawPekoe(ctx, 90, H - 120, 1.4, 'happy', this.t);
+  },
+  onPointerDown(p){
+    if (this.startBtn.down(p)) return;
+    if (this.resetBtn.down(p)) return;
+    this.confirmReset = false; this.resetBtn.text = 'Reset progress';
+  },
+  onPointerMove(){}, onPointerUp(){},
+  onKey(k){ if (k === 'Enter') Game.goto(MapScreen); }
+};
+
+// ===================== 12. MAP SCREEN =====================
+const MapScreen = {
+  enter(){
+    this.t = 0;
+    this.nodes = STAGE_DEFS.map((d, i) => ({
+      def: d,
+      x: 140 + i * 170,
+      y: i % 2 === 0 ? 270 : 380,
+    }));
+    const next = STAGE_ORDER[Math.min(Save.data.unlocked, STAGE_ORDER.length) - 1];
+    const d = stageDef(next);
+    if (Save.data.done.assembly) {
+      Mentor.say('The machine is complete! Replay any stage, or pull the big lever again in Stage 5.', 'cheer');
+    } else {
+      Mentor.say('Next up: Stage ' + d.num + ' — ' + d.name + '! ' + ({
+        gears: 'We need to grind those tea leaves. To the gear bench!',
+        screw: 'Now, how do we get the ground tea UP into the pot? Think like Archimedes…',
+        circuit: 'Cold tea is a crime. Let’s wire up a boiler!',
+        brew: 'Time for chemistry — the delicate art of the perfect steep.',
+        assembly: 'Everything is ready. Let’s put the WHOLE machine together!'
+      }[next] || ''), 'happy');
+    }
+  },
+  update(dt){ this.t += dt; },
+  render(ctx){
+    drawBackdrop(ctx);
+    label(ctx, 'THE TEA MACHINE PLAN', W / 2, 60, F(30, true), PAL.ink, 'center');
+    label(ctx, 'Complete each stage to build the machine', W / 2, 88, F(15), PAL.woodDark, 'center');
+    // conveyor path
+    ctx.save();
+    ctx.strokeStyle = PAL.woodDark; ctx.lineWidth = 10; ctx.lineCap = 'round';
+    ctx.setLineDash([2, 18]);
+    ctx.beginPath();
+    this.nodes.forEach((n, i) => { i === 0 ? ctx.moveTo(n.x, n.y) : ctx.lineTo(n.x, n.y); });
+    ctx.stroke();
+    ctx.restore();
+    for (const n of this.nodes) {
+      const unlocked = Save.isUnlocked(n.def.id);
+      const done = !!Save.data.done[n.def.id];
+      const isNext = unlocked && !done && Save.stageIndex(n.def.id) === Save.data.unlocked;
+      ctx.save();
+      ctx.translate(n.x, n.y);
+      if (isNext) {
+        const pulse = 1 + Math.sin(this.t * 4) * 0.06;
+        ctx.scale(pulse, pulse);
+        ctx.strokeStyle = PAL.brass; ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.arc(0, 0, 58, 0, TAU); ctx.stroke();
+      }
+      ctx.fillStyle = PAL.shadow;
+      ctx.beginPath(); ctx.arc(3, 5, 48, 0, TAU); ctx.fill();
+      ctx.fillStyle = done ? PAL.green : (unlocked ? PAL.cream : PAL.greyLite);
+      ctx.beginPath(); ctx.arc(0, 0, 48, 0, TAU); ctx.fill();
+      ctx.lineWidth = 3.5; ctx.strokeStyle = PAL.ink; ctx.stroke();
+      // icon
+      ctx.globalAlpha = unlocked ? 1 : 0.45;
+      this.drawIcon(ctx, n.def.id, done);
+      ctx.globalAlpha = 1;
+      if (!unlocked) {
+        // padlock
+        ctx.fillStyle = PAL.grey;
+        rr(ctx, -12, -6, 24, 20, 5); ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, -8, 8, Math.PI, 0); ctx.stroke();
+      }
+      if (done) {
+        ctx.fillStyle = PAL.cream;
+        ctx.beginPath(); ctx.arc(32, -32, 14, 0, TAU); ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        ctx.strokeStyle = PAL.greenDark; ctx.lineWidth = 4; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(26, -32); ctx.lineTo(31, -27); ctx.lineTo(39, -38); ctx.stroke();
+      }
+      label(ctx, 'STAGE ' + n.def.num, 0, 66, F(12, true), PAL.woodDark, 'center');
+      label(ctx, n.def.name, 0, 84, F(16, true), unlocked ? PAL.ink : PAL.grey, 'center');
+      ctx.restore();
+    }
+    Mentor.render(ctx);
+    // back to title
+    this._backBtn = this._backBtn || new Button({ x: 14, y: 10, w: 88, h: 38, text: '← Title', style: 'plain', fontSize: 15,
+      onClick: () => Game.goto(TitleScreen) });
+    this._backBtn.render(ctx);
+  },
+  drawIcon(ctx, id, done){
+    const c = done ? '#fff' : null;
+    switch (id) {
+      case 'gears':
+        drawGear(ctx, -8, -4, 10, 17, this.t, c || PAL.brass);
+        drawGear(ctx, 15, 10, 8, 12, -this.t * 1.4 + 0.2, c || PAL.copper);
+        break;
+      case 'screw':
+        ctx.save(); ctx.rotate(-0.8);
+        ctx.fillStyle = c || PAL.copper;
+        rr(ctx, -8, -26, 16, 52, 8); ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        ctx.lineWidth = 2.5;
+        for (let i = -1; i < 3; i++) {
+          ctx.beginPath(); ctx.moveTo(-8, -22 + i * 14); ctx.lineTo(8, -14 + i * 14); ctx.stroke();
+        }
+        ctx.restore();
+        break;
+      case 'circuit':
+        ctx.strokeStyle = c || PAL.amber; ctx.lineWidth = 5; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-6, -26); ctx.lineTo(6, -6); ctx.lineTo(-4, -4); ctx.lineTo(6, 26); ctx.lineTo(-2, 2);
+        ctx.lineTo(8, 0); ctx.closePath();
+        ctx.fillStyle = c || PAL.brass; ctx.fill();
+        ctx.strokeStyle = PAL.ink; ctx.lineWidth = 2.5; ctx.stroke();
+        break;
+      case 'brew':
+        ctx.fillStyle = c || PAL.teal;
+        ctx.beginPath();
+        ctx.moveTo(-14, -22); ctx.lineTo(-6, -4); ctx.lineTo(-16, 20); ctx.quadraticCurveTo(-18, 26, -10, 26);
+        ctx.lineTo(10, 26); ctx.quadraticCurveTo(18, 26, 16, 20); ctx.lineTo(6, -4); ctx.lineTo(14, -22);
+        ctx.closePath(); ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-16, -24); ctx.lineTo(16, -24); ctx.lineWidth = 3.5; ctx.stroke();
+        break;
+      case 'assembly':
+        ctx.fillStyle = c || PAL.brass;
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const a = -Math.PI / 2 + i * TAU / 5;
+          const a2 = a + TAU / 10;
+          ctx.lineTo(Math.cos(a) * 24, Math.sin(a) * 24);
+          ctx.lineTo(Math.cos(a2) * 11, Math.sin(a2) * 11);
+        }
+        ctx.closePath(); ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
+        break;
+    }
+  },
+  onPointerDown(p){
+    if (this._backBtn && this._backBtn.down(p)) return;
+    for (const n of this.nodes) {
+      const dx = p.x - n.x, dy = p.y - n.y;
+      if (dx * dx + dy * dy < 52 * 52) {
+        if (Save.isUnlocked(n.def.id)) {
+          SFX.click();
+          Game.goto(STAGES[n.def.id]);
+        } else {
+          SFX.thunk();
+          Mentor.say('That station is still locked! Finish the earlier stages first.', 'think');
+        }
+        return;
+      }
+    }
+  },
+  onPointerMove(){}, onPointerUp(){},
+  onKey(k){
+    if (k === 'Escape') Game.goto(TitleScreen);
+    if (k === 'Enter') {
+      const next = STAGE_ORDER[Math.min(Save.data.unlocked, STAGE_ORDER.length) - 1];
+      Game.goto(STAGES[next]);
+    }
+  }
+};
+
+// ===================== 13. CONCEPT CARD SCREEN =====================
+const ConceptScreen = {
+  enter(params){
+    this.def = params.def;
+    this.t = 0;
+    const idx = Save.stageIndex(this.def.id);
+    const nextId = STAGE_ORDER[idx]; // idx is 1-based, so this is the next stage
+    this.contBtn = new Button({
+      x: W / 2 - 110, y: 470, w: 220, h: 56, style: 'go', fontSize: 20,
+      text: nextId ? 'Next stage →' : 'To the map!',
+      onClick: () => Game.goto(nextId ? STAGES[nextId] : MapScreen)
+    });
+    SFX.ding();
+  },
+  update(dt){
+    this.t += dt;
+    this.contBtn.update(dt);
+    if (this.t < 0.5 && Math.random() < 0.6) Particles.spawn('confetti', rand(W * 0.2, W * 0.8), 90, 2);
+  },
+  render(ctx){
+    drawBackdrop(ctx);
+    Particles.render(ctx);
+    const pw = 620, ph = 330, px = W / 2 - pw / 2, py = 110;
+    const pop = easeOut(Math.min(1, this.t * 3));
+    ctx.save();
+    ctx.translate(W / 2, py + ph / 2); ctx.scale(pop, pop); ctx.translate(-W / 2, -(py + ph / 2));
+    panel(ctx, px, py, pw, ph, 22, PAL.paper);
+    label(ctx, '⭐ CONCEPT UNLOCKED! ⭐', W / 2, py + 46, F(20, true), PAL.amber, 'center');
+    label(ctx, this.def.concept, W / 2, py + 96, F(34, true), PAL.tealDark, 'center');
+    ctx.strokeStyle = PAL.greyLite; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(px + 60, py + 118); ctx.lineTo(px + pw - 60, py + 118); ctx.stroke();
+    drawWrapped(ctx, this.def.conceptText, W / 2, py + 140, pw - 90, 24, F(16), PAL.ink, 'center');
+    label(ctx, this.def.field + ' Engineering · Stage ' + this.def.num, W / 2, py + ph - 24, F(13, true), PAL.woodDark, 'center');
+    ctx.restore();
+    drawPekoe(ctx, 80, H - 80, 1.3, 'cheer', this.t);
+    this.contBtn.render(ctx);
+  },
+  onPointerDown(p){ this.contBtn.down(p); },
+  onPointerMove(){}, onPointerUp(){},
+  onKey(k){ if (k === 'Enter') this.contBtn.onClick(); }
+};
+
+// ===================== 14. STAGES =====================
+const STAGES = {};
+// __STAGE1__
+// __STAGE2__
+// __STAGE3__
+// __STAGE4__
+// __STAGE5__
+// fallback stubs for any stage not yet implemented
+for (const d of STAGE_DEFS) {
+  if (!STAGES[d.id]) {
+    STAGES[d.id] = {
+      enter(){ Mentor.say(d.name + ' is still under construction — check back soon!', 'think'); },
+      update(){}, render(ctx){ drawBackdrop(ctx); label(ctx, d.name + ' — coming soon', W / 2, H / 2, F(26, true), PAL.ink, 'center'); Mentor.render(ctx); },
+      onPointerDown(){ Game.goto(MapScreen); }, onPointerMove(){}, onPointerUp(){},
+      onKey(){ Game.goto(MapScreen); }
+    };
+  }
+}
+
+// ===================== 15. DEBUG / TEST HOOK =====================
+window.TTM = {
+  Game, Save, STAGES, STAGE_ORDER, Particles,
+  goto(id){
+    if (id === 'title') Game.goto(TitleScreen);
+    else if (id === 'map') Game.goto(MapScreen);
+    else Game.goto(STAGES[id]);
+  },
+  screenId(){
+    const s = Game.screen;
+    if (s === TitleScreen) return 'title';
+    if (s === MapScreen) return 'map';
+    if (s === ConceptScreen) return 'concept';
+    for (const id in STAGES) if (STAGES[id] === s) return id;
+    return 'unknown';
+  },
+  state(){
+    const s = Game.screen;
+    return { screen: this.screenId(), phase: s && s.phase, result: s && s.result, unlocked: Save.data.unlocked };
+  },
+  pressRun(){ if (Game.screen && Game.screen.pressRun) Game.screen.pressRun(); },
+  setParams(o){ if (Game.screen && Game.screen.setParams) Game.screen.setParams(o); },
+  continue_(){ const s = Game.screen; if (s && s.phase === 'result' && s.result && s.result.win) s.continueAfterWin(); }
+};
+
+// ===================== 16. BOOT =====================
+Save.load();
+Game.goto(TitleScreen);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
