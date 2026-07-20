@@ -1838,7 +1838,7 @@ class Stage3Circuit extends StageBase {
       index: saved.v === 6 ? 0 : saved.v === 24 ? 2 : 1 }));
     this.powerGauge = this.ui.add(new Gauge({ x: 245, y: 288, r: 46, min: 0, max: 120, unit: 'W', label: 'Heating power',
       bands: [{from:0,to:40,color:PAL.greyLite},{from:40,to:70,color:PAL.green},{from:70,to:120,color:PAL.red}] }));
-    this.thermo = this.ui.add(new Meter({ x: 316, y: 360, w: 26, h: 130, max: 110, band: [100, 110], color: PAL.red,
+    this.thermo = this.ui.add(new Meter({ x: 316, y: 330, w: 26, h: 130, max: 110, band: [100, 110], color: PAL.red,
       label: '°C', format: v => Math.round(v) + '°' }));
   }
   sayIntro(){
@@ -1925,10 +1925,10 @@ class Stage3Circuit extends StageBase {
         this.temp += (s.P - (this.temp - 20) * 0.5) / 2.5 * dt;
         this.thermo.value = this.temp;
         if (this.temp > 45 && Math.random() < dt * (this.temp - 40) / 6) {
-          Particles.spawn('bubble', 222 + rand(-28, 28), 462, 1);
+          Particles.spawn('bubble', 222 + rand(-28, 28), 438, 1);
           if (Math.random() < 0.3) SFX.bubble();
         }
-        if (this.temp > 90) Particles.spawn('steam', 140, 398, 1);
+        if (this.temp > 90) Particles.spawn('steam', 138, 376, 1);
         if (this.temp >= 100) {
           if (!this.whistled) { this.whistled = true; SFX.whistle(); }
           const cfg = this.coils.a && this.coils.b ? (this.wires.w5 ? 'in SERIES' : 'in PARALLEL') : 'solo';
@@ -1946,7 +1946,7 @@ class Stage3Circuit extends StageBase {
     if (this.phase === 'build') { this.thermo.value = 20; this.powerGauge.value = 0; }
     if (this.phase === 'result' && this.result.win) {
       this.dotT += dt;
-      if (Math.random() < dt * 6) Particles.spawn('steam', 140, 398, 1);
+      if (Math.random() < dt * 6) Particles.spawn('steam', 138, 376, 1);
     }
   }
   coilRect(which){ return { x: 588, y: which === 'a' ? 148 : 263, w: 108, h: 44 }; }
@@ -1981,12 +1981,12 @@ class Stage3Circuit extends StageBase {
     label(ctx, 'POWER STATION', 245, 116, F(13, true), PAL.tealDark, 'center');
     label(ctx, 'Fuse limit: 70 W', 245, 334, F(12), PAL.redDark, 'center');
     // kettle + thermometer
-    label(ctx, 'WATER TANK', 222, 372, F(12, true), PAL.woodDark, 'center');
-    drawKettle(ctx, 222, 482, 1.05, { color: PAL.steel });
+    label(ctx, 'WATER TANK', 222, 348, F(12, true), PAL.woodDark, 'center');
+    drawKettle(ctx, 222, 458, 1.05, { color: PAL.steel });
     // heating element under kettle
     ctx.fillStyle = this.phase !== 'build' && this.sim && !this.sim.open && !this.sim.short && !this.fuseBlown
       ? mixColor('#8f6240', '#ff5a2e', clamp((this.sim.P) / 70, 0, 1)) : PAL.woodDark;
-    rr(ctx, 162, 484, 120, 12, 6); ctx.fill();
+    rr(ctx, 162, 460, 120, 12, 6); ctx.fill();
     ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink; ctx.stroke();
     // circuit board
     panel(ctx, 385, 92, 550, 350, 14, '#e9dcc0', PAL.ink);
